@@ -1,0 +1,726 @@
+####################################
+### Models Cydalima perspectalis ###
+####################################
+
+### 1. Variables clim�tiques/ambientals doc:"1. Variables_Cp.R"
+### 2. Presencies doc:"2. Pres�ncies_Cp.R"
+### 3. Pseudoabsencies i background doc:"2. Pres�ncies_Cp.R"
+### 4. Model �sia (GLM i Maxent)
+### 5. Model Europa
+### 6. Model Europa ponderat amb Model �sia
+### 7. Model Catalunya
+### 8. Model Catalunya ponderat amb Model �sia
+
+
+### load
+setwd("C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/")
+
+library(rgdal)
+library(tree)
+library(party)
+library(raster)
+library(sp)
+library(dismo) #LIBRERIA PARA MODELOS DE DISTRIBUCION
+library(plotmo) #LIBRERIA PARA VISUALIZACION DE CURVAS DE RESPUESTA
+library(mgcv) #OTRA LIBRERIA PARA GAM
+library(randomForest) #RANDOM FOREST
+library(gbm)#BOSTED REGRESSION TREE
+#library(gam)#GENERALIZED ADDITIVE MODELS
+library(rJava)
+library(png)
+library(DHARMa)
+library(openxlsx)
+library(MuMIn) #AIC
+library(ecospat) #Boyce
+
+
+
+
+### Model AIC ###
+#Variables
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+
+dades <- c("asia_pback_training_random.csv","europa_pback_training_random.csv","asia_pback_training_buffer.csv","europa_pback_training_buffer.csv" )
+continent <- c("asia","europa","asia","europa")
+bg <- c("radom","radom","buffer","buffer")
+
+for (i in 1:4){
+  #Presencies
+  especie <- read.table(paste0("GBIF/",dades[i]), sep=";", dec=".", header = T)
+  
+  vars.table<-as.data.frame(extract(vars, especie[,c(2,3)]))
+  especie <- cbind(especie,vars.table)
+  
+  #Background ponderat
+  especie[especie$presence==1, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==1,])
+  especie[especie$presence==0, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==0,])
+  
+  # MODELO
+  globmod<-glm (presence ~  
+                  CHELSA_anual_bio02+I(CHELSA_anual_bio02^2) + CHELSA_anual_bio05+I(CHELSA_anual_bio05^2) + CHELSA_anual_bio06+I(CHELSA_anual_bio06^2) + CHELSA_anual_bio12+I(CHELSA_anual_bio12^2) +
+                  CHELSA_anual_bio15+I(CHELSA_anual_bio15^2) + CHELSA_anual_bio17+I(CHELSA_anual_bio17^2) + CHELSA_anual_bio18+I(CHELSA_anual_bio18^2) + CHELSA_anual_bio19+I(CHELSA_anual_bio19^2),
+                family = binomial(link = "logit"), data=especie, weights=peso, na.action = na.fail)
+  
+  MuMin <- dredge(globmod, rank = AICc)#fixed=~CHELSA_anual_bio02+plan+slope+aspect
+  MuMin$continent <- continent[i]
+  MuMin$bg <- bg[i]
+  
+  write.xlsx(MuMin, paste0("Model GLM/MuMin_",continent[i],"_",bg[i],".xlsx"))
+  
+  print(i)
+  
+}
+
+
+
+###############################################
+################ 4. Model Asia ################
+###############################################
+
+#### MAXENT ####
+
+#Per especificar quina metodologia de background/pseudoabsencies es fa servir
+met<-c("random","buffer")
+i<-1
+
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+
+vars_asia<-crop(vars,y=c(95,150,20,45))
+vars_europa<-crop(vars,y=c(-15,50,35,75))
+
+
+#jar <- paste(system.file(package="dismo"), "F:/TESIS/CURSOS/curso GBIF (mar 2016)/material_curso_modelos/taller2/maxent/maxent.jar", sep='')# necesario antes de correr MaxEnt la primera vez  
+# so importat too. Put (manualmente), maxent.jar in the java folder of this package. In thisc case: C:\Users\Mariangeles\Documents\R\win-library\3.3\dismo\java
+# info settings: https://groups.google.com/forum/#!topic/maxent/yRBlvZ1_9rQ
+
+asia <- read.table(paste0("GBIF/asia_pseudo_training",met[i],".csv"), sep=";", dec=".", header = T)
+asia <- subset(asia, asia$presence==1)
+europa <- read.table(paste0("GBIF/europa_pseudo_training",met[i],".csv"), sep=";", dec=".", header = T)
+europa <- subset(europa, europa$presence==1)
+
+especie <- data.frame(cbind(asia$x, asia$y))
+colnames(especie) <- c("lon","lat")
+
+especie.bg <- read.table(paste0("GBIF/asia_pback_training_",met[i],".csv"), sep=";", dec=".", header = T)
+bg <- especie.bg[!especie.bg$presence==1, ]
+bg <- data.frame(cbind(bg$x, bg$y))
+colnames(bg) <- c("lon", "lat")
+
+# CORREMOS EL MODELO
+maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Model maxent/",met[i],"/Asia/")
+me <- maxent(vars_asia, p=especie, a=bg, args=c("betamultiplier=3", "threshold=FALSE", "writeplotdata=TRUE",
+                                                "replicates=10", "replicatetype=crossvalidate", "outputgrids=FALSE","appendtoresultsfile=TRUE", "responsecurves=TRUE","jackknife=TRUE", maxentout))
+me <- maxent(vars_asia, p=especie, a=bg, args=c("betamultiplier=3", "outputgrids=FALSE","threshold=FALSE", "replicates=10", "replicatetype=crossvalidate","jackknife=FALSE", "responsecurves=T"))
+save(me,file=paste0("Model maxent/",met[i],"/me_Asia.Rdata"))
+load(paste0("Model maxent/",met[i],"/me_Asia.Rdata"))
+
+# PLOT CURVAS DE RESPUESTA EN LA MISMA IMAGEN
+# curvas de respuesta con interaccion y sin interaccion (_only)
+
+response_bio2 <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio02.dat"), sep=",", dec=".", header=T)
+response_bio2only <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio02_only.dat"), sep=",", dec=".", header=T)
+
+response_bio5 <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio05.dat"), sep=",", dec=".", header=T)
+response_bio5only <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio05_only.dat"), sep=",", dec=".", header=T)
+
+response_bio6 <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio06.dat"), sep=",", dec=".", header=T)
+response_bio6only <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio06_only.dat"), sep=",", dec=".", header=T)
+
+response_bio12 <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio12.dat"), sep=",", dec=".", header=T)
+response_bio12only <- read.table(paste0("Model maxent/",met[i],"/Asia/plots/species_CHELSA_anual_bio12_only.dat"), sep=",", dec=".", header=T)
+
+par(mfrow=c(2,1))
+plot(response_bio12$x,response_bio12$y)
+plot(response_bio12only$x,response_bio12only$y)
+
+
+
+#PREDICCION GEOGRAFICA REFERENCE PERIOD �SIA
+maxent.ref <- predict(me, vars_asia, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))# tragicamente hay que usar logistic output para tener los resultados en tanto por 1, las otras dos opciones estan relacionadas con dar menos peso a los puntos extrapolados. y son las que aparecen por defecto en MaXent.
+maxent.ref.avg <- mean(maxent.ref[["layer.1"]],maxent.ref[["layer.2"]],maxent.ref[["layer.3"]],
+                       maxent.ref[["layer.4"]],maxent.ref[["layer.5"]],maxent.ref[["layer.6"]],
+                       maxent.ref[["layer.7"]],maxent.ref[["layer.8"]],maxent.ref[["layer.9"]],
+                       maxent.ref[["layer.10"]])
+
+par(mfrow=c(1,1))
+plot(maxent.ref.avg, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+points(especie, pch=19, col="red", cex=0.8)
+points(especie.bg[especie.bg$presence==0,"x"], especie.bg[especie.bg$presence==0,"y" ], pch=19, cex=0.2, col="grey3")
+
+
+#PREDICCION GEOGRAFICA REFERENCE PERIOD EUROPA
+maxent.ref.eu <- predict(me, vars_europa,args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))# tragicamente hay que usar logistic output para tener los resultados en tanto por 1, las otras dos opciones estan relacionadas con dar menos peso a los puntos extrapolados. y son las que aparecen por defecto en MaXent.
+maxent.ref.eu.avg <- mean(maxent.ref.eu[["layer.1"]],maxent.ref.eu[["layer.2"]],maxent.ref.eu[["layer.3"]],
+                       maxent.ref.eu[["layer.4"]],maxent.ref.eu[["layer.5"]],maxent.ref.eu[["layer.6"]],
+                       maxent.ref.eu[["layer.7"]],maxent.ref.eu[["layer.8"]],maxent.ref.eu[["layer.9"]],
+                       maxent.ref.eu[["layer.10"]])
+
+plot(maxent.ref.eu.avg, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+points(europa[,c(2,3)], pch=19, col="red", cex=0.8)
+
+
+# GUARDAMOS EL RASTER DE IDONEIDAD PARA LA ESPECIE antes y despues de la sequ�???a
+writeRaster(maxent.ref.avg, filename= paste0("Model maxent/",met[i],"/Asia.tif"), format="GTiff", overwrite=TRUE)
+writeRaster(maxent.ref.eu.avg, filename= paste0("Model maxent/",met[i],"/Asia_Europa.tif"), format="GTiff", overwrite=TRUE)
+
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse después de calibrar el modelo con datos del periodo de referencia, pero as�??? ahorro espacio)
+##AUC
+especie_test <- read.table(paste0("GBIF/asia_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+
+especie_test$idoneidad <- extract(maxent.ref.avg, especie_test[, c("x","y")])
+especie_test$idoneidad <- extract(maxent.ref.eu.avg, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+##Continuous Boyce Index
+maxent.ref.avg<-raster(paste0("Model maxent/",met[i],"/Asia.tif"))
+especie_test <- read.table(paste0("GBIF/asia_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$SDM<-extract(maxent.ref.avg, especie_test[,c(2,3)])
+
+maxent.ref.eu.avg<-raster(paste0("Model maxent/",met[i],"/Asia_Europa.tif"))
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$SDM<-extract(maxent.ref.eu.avg, especie_test[,c(2,3)])
+
+obs <- (especie_test$SDM[which(especie_test$presence==1)])
+
+ecospat.boyce (fit = especie_test$SDM , obs, nclass=0, 
+               window.w="default", res=100, PEplot = TRUE)
+
+
+
+#### GLM ASIA ####
+
+#Per especificar quina metodologia de background/pseudoabsencies es fa servir
+met<-c("random","buffer")
+i<-1
+
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+
+vars_asia<-crop(vars,y=c(95,150,20,45))
+vars_europa<-crop(vars,y=c(-15,50,35,75))
+
+europa <- read.xlsx("GBIF/europa.xlsx")
+asia <- read.xlsx("GBIF/asia.xlsx")
+
+especie <- read.table(paste0("GBIF/asia_pback_training_",met[i],".csv"), sep=";", dec=".", header = T)
+vars.table<-as.data.frame(extract(vars, especie[,c(2,3)]))
+especie <- cbind(especie,vars.table)
+
+# COLUMNA BACKGROUND PONDERADO
+especie[especie$presence==1, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==1,])
+especie[especie$presence==0, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==0,])
+
+# MODELO
+glm.backgroundw<-glm (presence ~  
+                      poly(CHELSA_anual_bio02, 2, raw=T) + poly(CHELSA_anual_bio05, 2, raw=T)  + poly(CHELSA_anual_bio06, 2, raw=T) + poly(CHELSA_anual_bio12,2, raw=T)+
+                      poly(CHELSA_anual_bio15,2, raw=T) + poly(CHELSA_anual_bio17,2, raw=T) + poly(CHELSA_anual_bio18,2, raw=T)+ poly(CHELSA_anual_bio19,2, raw=T), 
+                      family = binomial(link = "logit"), data=especie, weights=peso)
+
+#resumen de los modelos
+summary.lm(glm.backgroundw)
+
+
+#DIBUJAMOS LAS CURVAS DE RESPUESTA
+jpeg(paste0("Model GLM/",met[i]," i Wan14/Asia variables.jpeg"))
+par(mfrow=c(3,3))
+plotmo(glm.backgroundw, level=0.95, level.shade="skyblue2")
+dev.off()
+
+#PREDICCION GEOGRAFICA REFERENCE PERIOD
+glm.backgroundw.ref<-predict(vars_asia, glm.backgroundw, type="response")
+jpeg(paste0("Model GLM/",met[i]," i Wan14/Asia map.jpeg"))
+par(mfrow=c(1,1))
+plot(glm.backgroundw.ref, main=paste0("Asia"))
+points(asia[,c(2,3)], pch=19, col="red", cex=0.8)
+dev.off()
+
+#PREDICCION GEOGRAFICA EUROPA
+glm.backgroundw.eu<-predict(vars_europa, glm.backgroundw, type="response")
+jpeg(paste0("Model GLM/",met[i]," i Wan14/EuropaAsia map.jpeg"))
+par(mfrow=c(1,1))
+plot(glm.backgroundw.eu, main=paste0("GLM.backgroundw"))
+#points(europa[,c(2,3)], pch=19, col="red", cex=0.8)
+dev.off()
+
+# GUARDAMOS EL RASTER DE IDONEIDAD PARA LA ESPECIE antes y despues de la sequ�a
+writeRaster(glm.backgroundw.ref, filename= paste0("Model GLM/",met[i]," i Wan14/Asia.tif"), format="GTiff", overwrite=TRUE)
+writeRaster(glm.backgroundw.eu, filename= paste0("Model GLM/",met[i]," i Wan14/Asia_Europa.tif"), format="GTiff", overwrite=TRUE)
+
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse despu�s de calibrar el modelo con datos del periodo de referencia, pero as� ahorro espacio)
+#Asia
+especie_test <- read.table(paste0("GBIF/asia_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$idoneidad <- extract(glm.backgroundw.ref, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+jpeg(paste0("Model GLM/",met[i]," i Wan14/Asia validacio.jpeg"))
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+dev.off()
+
+#AsiaEuropa
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$idoneidad <- extract(glm.backgroundw.eu, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+jpeg(paste0("Model GLM/",met[i]," i Wan14/EuropaAsia validacio.jpeg"))
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+dev.off()
+
+
+
+###############################################
+################ 5. Model Europa ################
+###############################################
+
+#### MAXENT ####
+
+#Per especificar quina metodologia de background/pseudoabsencies es fa servir
+met<-c("random","buffer")
+i<-1
+
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+vars_europa<-crop(vars,y=c(-15,50,35,75))
+
+europa <- read.table(paste0("GBIF/europa_pseudo_training",met[i],".csv"), sep=";", dec=".", header = T)
+europa <- subset(europa, europa$presence==1)
+#europa <- subset(europa, europa$year>2007&europa$year<2016) ##**!!Europa 1a generaci� (de 2007 a 2015)
+#europa<-na.omit(europa)
+
+especie <- data.frame(cbind(europa$x, europa$y))
+colnames(especie) <- c("lon","lat")
+
+especie.bg <- read.table(paste0("GBIF/europa_pback_training_",met[i],".csv"), sep=";", dec=".", header = T)
+bg <- especie.bg[!especie.bg$presence==1, ]
+bg <- data.frame(cbind(bg$x, bg$y))
+colnames(bg) <- c("lon", "lat")
+
+#Pes dels punts bg d'acuerd amb mod_Asia
+AsiaEuropa_r<-raster("C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/Model maxent/random/Asia_Europa.tif")
+bg$sdm<-extract(AsiaEuropa_r,bg[,c(1,2)])
+bg$peso <- 1/(1+(bg$sdm/(bg$sdm-1))^2) #Gallien 2015
+bg <- subset(bg, bg$peso>0.7)
+bg<-bg[,c(1,2)]
+
+# CORREMOS EL MODELO
+maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/Model maxent/",met[i],"/EuropaWeighted/")
+#maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/Model maxent/",met[i],"/Europa/")
+#maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/Model maxent/",met[i],"/Europa0714/")
+
+me <- maxent(vars_europa, p=especie, a=bg, args=c("betamultiplier=3", "threshold=FALSE", "writeplotdata=TRUE",
+                                                "replicates=10", "replicatetype=crossvalidate", "outputgrids=FALSE","appendtoresultsfile=TRUE", "responsecurves=TRUE","jackknife=TRUE", maxentout))
+me <- maxent(vars_europa, p=especie, a=bg, args=c("betamultiplier=3", "outputgrids=FALSE","threshold=FALSE", "replicates=10", "replicatetype=crossvalidate","jackknife=FALSE", "responsecurves=FALSE"))
+
+save(me,file=paste0("Model maxent/",met[i],"/me_EuropaWeighted.Rdata"))
+load("Model maxent/",met[i],"/me_EuropaWeighted.Rdata")
+#save(me,file=paste0("Model maxent/",met[i],"/me_Europa.Rdata"))
+#load("Model maxent/",met[i],"/me_Europa.Rdata")
+#save(me,file=paste0("Model maxent/",met[i],"/me_Europa0714.Rdata"))
+#load("Model maxent/",met[i],"/me_Europa0714.Rdata")
+
+
+# PLOT CURVAS DE RESPUESTA EN LA MISMA IMAGEN
+# curvas de respuesta con interaccion y sin interaccion (_only)
+
+response_bio2 <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio02.dat"), sep=",", dec=".", header=T)
+response_bio2only <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio02_only.dat"), sep=",", dec=".", header=T)
+
+response_bio5 <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio05.dat"), sep=",", dec=".", header=T)
+response_bio5only <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio05_only.dat"), sep=",", dec=".", header=T)
+
+response_bio6 <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio06.dat"), sep=",", dec=".", header=T)
+response_bio6only <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio06_only.dat"), sep=",", dec=".", header=T)
+
+response_bio12 <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio12.dat"), sep=",", dec=".", header=T)
+response_bio12only <- read.table(paste0("Model maxent/",met[i],"/Europa/plots/species_CHELSA_anual_bio12_only.dat"), sep=",", dec=".", header=T)
+
+par(mfrow=c(2,1))
+plot(response_bio5$x,response_bio5$y)
+plot(response_bio5only$x,response_bio5only$y)
+
+
+
+#PREDICCION GEOGRAFICA REFERENCE PERIOD EUROPA
+maxent.ref <- predict(me, vars_europa, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))# tragicamente hay que usar logistic output para tener los resultados en tanto por 1, las otras dos opciones estan relacionadas con dar menos peso a los puntos extrapolados. y son las que aparecen por defecto en MaXent.
+maxent.ref.avg <- mean(maxent.ref[["layer.1"]],maxent.ref[["layer.2"]],maxent.ref[["layer.3"]],
+                       maxent.ref[["layer.4"]],maxent.ref[["layer.5"]],maxent.ref[["layer.6"]],
+                       maxent.ref[["layer.7"]],maxent.ref[["layer.8"]],maxent.ref[["layer.9"]],
+                       maxent.ref[["layer.10"]])
+
+par(mfrow=c(1,1))
+plot(maxent.ref.avg, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+points(especie, pch=19, col="red", cex=0.8)
+points(especie.bg[especie.bg$presence==0,"x"], especie.bg[especie.bg$presence==0,"y" ], pch=19, cex=0.2, col="grey3")
+
+
+#PREDICCION GEOGRAFICA REFERENCE PERIOD �SIA
+maxent.ref.as <- predict(me, vars_asia, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))# tragicamente hay que usar logistic output para tener los resultados en tanto por 1, las otras dos opciones estan relacionadas con dar menos peso a los puntos extrapolados. y son las que aparecen por defecto en MaXent.
+maxent.ref.avg.as <- mean(maxent.ref.as[["layer.1"]],maxent.ref.as[["layer.2"]],maxent.ref.as[["layer.3"]],
+                          maxent.ref.as[["layer.4"]],maxent.ref.as[["layer.5"]],maxent.ref.as[["layer.6"]],
+                          maxent.ref.as[["layer.7"]],maxent.ref.as[["layer.8"]],maxent.ref.as[["layer.9"]],
+                          maxent.ref.as[["layer.10"]])
+plot(maxent.ref.avg.as, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+
+
+# GUARDAMOS EL RASTER DE IDONEIDAD PARA LA ESPECIE antes y despues de la sequ�???a
+writeRaster(maxent.ref.avg, filename= paste0("Model maxent/",met[i],"/EuropaWeighted.tif"), format="GTiff", overwrite=TRUE)
+writeRaster(maxent.ref.avg, filename= paste0("Model maxent/",met[i],"/Europa.tif"), format="GTiff", overwrite=TRUE)
+writeRaster(maxent.ref.avg, filename= paste0("Model maxent/",met[i],"/Europa0714.tif"), format="GTiff", overwrite=TRUE)
+
+writeRaster(maxent.ref.avg.as, filename= paste0("Model maxent/",met[i],"/EuropaWeighted_Asia.tif"), format="GTiff", overwrite=TRUE)
+writeRaster(maxent.ref.avg.as, filename= paste0("Model maxent/",met[i],"/Europa_Asia.tif"), format="GTiff", overwrite=TRUE)
+
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse después de calibrar el modelo con datos del periodo de referencia, pero as�??? ahorro espacio)
+##AUC
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+#especie_test <- subset(especie_test, especie_test$year==0 | especie_test$year>2007&especie_test$year<2015) ##**!!Europa 1a generaci� (de 2007 a 2014)
+
+especie_test$idoneidad <- extract(maxent.ref.as.avg, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+#Boyce
+##Continuous Boyce Index
+maxent.ref.avg<-raster(paste0("Model maxent/",met[i],"/Europa.tif"))
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$SDM<-extract(maxent.ref.avg, especie_test[,c(2,3)])
+
+maxent.ref.as.avg<-raster(paste0("Model maxent/",met[i],"/Europa_Asia.tif"))
+especie_test <- read.table(paste0("GBIF/asia_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$SDM<-extract(maxent.ref.as.avg, especie_test[,c(2,3)])
+
+maxent.ref.avg<-raster(paste0("Model maxent/",met[i],"/EuropaWeighted.tif"))
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$SDM<-extract(maxent.ref.avg, especie_test[,c(2,3)])
+
+maxent.ref.as.avg<-raster(paste0("Model maxent/",met[i],"/EuropaWeighted_Asia.tif"))
+especie_test <- read.table(paste0("GBIF/asia_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+especie_test$SDM<-extract(maxent.ref.as.avg, especie_test[,c(2,3)])
+
+
+obs <- (especie_test$SDM[which(especie_test$presence==1)])
+ecospat.boyce (fit = especie_test$SDM , obs, nclass=0, 
+               window.w="default", res=100, PEplot = TRUE)
+
+Pred<- especie_test$SDM
+Sp.occ <- especie_test$presence
+th<-0.5
+xtab <- table(Pred >= th, Sp.occ)
+ecospat.cohen.kappa(xtab)
+
+
+
+#PROJECCIONS FUTURES
+
+for (j in c("45","85")){
+  for (k in c("2041-60","2061-80")){
+
+    variables.f <- stack(list.files(path=paste0("C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Futures CMIP5/rcp",j,"/",k,"/"),pattern='*.tif', full.names=TRUE))
+    variables.f<-variables.f[[c(12,15,16,4,7,9,10,11)]]
+    vars_europa.f<-crop(variables.f,y=c(-15,50,35,75))
+    names(vars_europa.f)<-names(vars_europa)
+
+    maxent.ref.f <- predict(me, vars_europa.f, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))# tragicamente hay que usar logistic output para tener los resultados en tanto por 1, las otras dos opciones estan relacionadas con dar menos peso a los puntos extrapolados. y son las que aparecen por defecto en MaXent.
+    maxent.ref.avg.f <- mean(maxent.ref.f[["layer.1"]],maxent.ref.f[["layer.2"]],maxent.ref.f[["layer.3"]],
+                       maxent.ref.f[["layer.4"]],maxent.ref.f[["layer.5"]],maxent.ref.f[["layer.6"]],
+                       maxent.ref.f[["layer.7"]],maxent.ref.f[["layer.8"]],maxent.ref.f[["layer.9"]],
+                       maxent.ref.f[["layer.10"]])
+
+    par(mfrow=c(1,1))
+    plot(maxent.ref.avg.f, main= paste("MAXENT Cydalima",k,j,sep=" "), cex.main=0.8)
+    
+    writeRaster(maxent.ref.avg.f, filename= paste0("Model maxent/",met[i],"/EuropaWeighted_",j,"_",k,".tif"), format="GTiff", overwrite=TRUE)
+    
+    
+    print(paste(j,k))
+  }
+}  
+
+
+
+
+#### GLM EUROPA ####
+#Per especificar quina metodologia de background/pseudoabsencies es fa servir
+met<-c("random","buffer")
+i<-1
+
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+vars_europa<-crop(vars,y=c(-15,50,35,75))
+vars_asia<-crop(vars,y=c(95,150,20,45))
+#vars_europa<-scale(vars_europa) #Prova amb les variables estandaritzades. Recordar a estandaritzar tamb� les variables de les projeccions
+
+europa.r<-raster(paste0("C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/Model GLM/",met[i]," i Wan14/Asia_Europa.tif"))
+
+europa <- read.xlsx("GBIF/europa.xlsx")
+especie <- read.table(paste0("GBIF/europa_pback_training_",met[i],".csv"), sep=";", dec=".", header = T)
+
+#europa <- subset(europa, europa$year>2007&europa$year<2015) ##**!!Europa 1a generaci� (de 2007 a 2014)
+#especie <- subset(especie, especie$year==0 | especie$year>2007&especie$year<2015) ##**!!Europa 1a generaci� (de 2007 a 2014)
+
+vars.table<-as.data.frame(extract(vars, especie[,c(2,3)]))
+especie <- cbind(especie,vars.table)
+
+# COLUMNA BACKGROUND PONDERADO
+especie$europa.asia <- extract(europa.r,especie[,c(2,3)])
+especie$peso <- 1/(1+(especie$europa.asia/(especie$europa.asia-1))^2) #Gallien 2015
+#especie[especie$presence==1, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==1,])
+#especie[especie$presence==0, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==0,])
+
+# MODELO
+glm.backgroundw<-glm (presence ~  
+                      poly(CHELSA_anual_bio02, 2, raw=T) + poly(CHELSA_anual_bio05, 2, raw=T)  + poly(CHELSA_anual_bio06, 2, raw=T) + poly(CHELSA_anual_bio12,2, raw=T)+
+                      poly(CHELSA_anual_bio15,2, raw=T) + poly(CHELSA_anual_bio17,2, raw=T) + poly(CHELSA_anual_bio18,2, raw=T)+ poly(CHELSA_anual_bio19,2, raw=T), 
+                      family = binomial(link = "logit"), data=especie, weights=peso)
+
+#resumen de los modelos
+summary.lm(glm.backgroundw)
+
+
+#DIBUJAMOS LAS CURVAS DE RESPUESTA
+jpeg(paste0("Model GLM/",met[i]," i Wan14/Europa variables.jpeg"))
+#jpeg(paste0("Model GLM/",met[i]," i Wan14/Europa0714 variables.jpeg"))
+par(mfrow=c(2,3))
+plotmo(glm.backgroundw, level=0.95, level.shade="skyblue2")
+dev.off()
+
+#PREDICCION GEOGRAFICA EUROPA
+glm.backgroundw.ref<-predict(vars_europa, glm.backgroundw, type="response")
+jpeg(paste0("Model GLM/",met[i]," i Wan14/Europa map.jpeg"))
+#jpeg(paste0("Model GLM/",met[i]," i Wan14/Europa0714 map.jpeg"))
+par(mfrow=c(1,1))
+plot(glm.backgroundw.ref, main=paste0("Europa"))
+#points(europa[,c(2,3)], pch=19, col="red", cex=0.8)
+dev.off()
+
+#PREDICCION GREOGRAFICA ASIA
+glm.backgroundw.as<-predict(vars_asia, glm.backgroundw, type="response")
+
+# GUARDAMOS EL RASTER DE IDONEIDAD PARA LA ESPECIE antes y despues de la sequ�a
+writeRaster(glm.backgroundw.ref, filename= paste0("Model GLM/",met[i]," i Wan14/EuropaWeighted.tif"), format="GTiff", overwrite=TRUE)
+#writeRaster(glm.backgroundw.ref, filename= paste0("Model GLM/",met[i]," i Wan14/Europa0714.tif"), format="GTiff", overwrite=TRUE)
+writeRaster(glm.backgroundw.as, filename= paste0("Model GLM/",met[i]," i Wan14/EuropaWeighted_Asia.tif"), format="GTiff", overwrite=TRUE)
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse despu�s de calibrar el modelo con datos del periodo de referencia, pero as� ahorro espacio)
+especie_test <- read.table(paste0("GBIF/europa_pback_test_",met[i],".csv"), sep=";", dec=".", header = T)
+#especie_test <- subset(especie_test, especie_test$year==0 | especie_test$year>2007&especie_test$year<2015) ##**!!Europa 1a generaci� (de 2007 a 2014)
+
+especie_test$idoneidad <- extract(glm.backgroundw.ref, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+jpeg(paste0("Model GLM/",met[i]," i Wan14/Europa validacio.jpeg"))
+#jpeg(paste0("Model GLM/",met[i]," i Wan14/Europa0714 validacio.jpeg"))
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+dev.off()
+
+
+#PROJECCIONS FUTURES
+for (j in c("45","85")){
+  for (k in c("2041-60","2061-80")){
+    
+    variables.f <- stack(list.files(path=paste0("C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Futures CMIP5/rcp",j,"/",k,"/"),pattern='*.tif', full.names=TRUE))
+    variables.f<-variables.f[[c(12,15,16,4,7,9,10,11)]]
+    vars_europa.f<-crop(variables.f,y=c(-15,50,35,75))
+    names(vars_europa.f)<-names(vars_europa)
+    #vars_europa.f<-scale(vars_europa.f) #Variables estandaritzades
+    
+    glm.backgroundw.f<-predict(vars_europa.f, glm.backgroundw, type="response")
+    #par(mfrow=c(1,1))
+    plot(glm.backgroundw.f, main= paste("GLM Cydalima",k,j,sep=" "), cex.main=0.8)
+    #writeRaster(glm.backgroundw.f, filename= paste0("Model GLM/",met[i]," i Wan14/EuropaWeighted_",j,"_",k,".tif"), format="GTiff", overwrite=TRUE)
+    
+    print(paste(j,k))
+  }
+}  
+
+
+
+####################################################
+################ 7. Model Catalunya ################
+####################################################
+
+#### MAXENT ####
+
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+vars_cat<-crop(vars,y=c(-2,4,40,43))
+
+cat <- read.table(paste0("AlertaForestal/cat_pseudo_training.csv"), sep=",", dec=".", header = T)
+cat <- subset(cat, cat$presence==1)
+#europa<-na.omit(europa)
+
+especie <- data.frame(cbind(cat$longitude, cat$latitude))
+colnames(especie) <- c("lon","lat")
+
+especie.bg <- read.table(paste0("GBIF/europa_pback_training.csv"), sep=";", dec=".", header = T)
+bg <- especie.bg[!especie.bg$presence==1, ]
+bg <- data.frame(cbind(bg$x, bg$y))
+colnames(bg) <- c("lon", "lat")
+
+# CORREMOS EL MODELO
+maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Model maxent/Cat/")
+
+me <- maxent(vars_europa, p=especie, a=bg, args=c("betamultiplier=3", "threshold=FALSE", "writeplotdata=TRUE",
+                                                  "replicates=10", "replicatetype=crossvalidate", "outputgrids=FALSE","appendtoresultsfile=TRUE", "responsecurves=TRUE","jackknife=TRUE", maxentout))
+me <- maxent(vars_europa, p=especie, a=bg, args=c("betamultiplier=3", "outputgrids=FALSE","threshold=FALSE", "replicates=10", "replicatetype=crossvalidate","jackknife=FALSE", "responsecurves=FALSE"))
+
+save(me,file=paste0("Model maxent/Outputs/me_cat.Rdata"))
+load("Model maxent/Outputs/me_cat.Rdata")
+
+
+# PLOT CURVAS DE RESPUESTA EN LA MISMA IMAGEN
+# curvas de respuesta con interaccion y sin interaccion (_only)
+
+response_bio2 <- read.table(paste0("Model maxent/Cat/plots/species_CHELSA_anual_bio02.dat"), sep=",", dec=".", header=T)
+response_bio2only <- read.table(paste0("Model maxent/Cat/plots/species_CHELSA_anual_bio02_only.dat"), sep=",", dec=".", header=T)
+
+par(mfrow=c(2,1))
+plot(response_bio5$x,response_bio5$y)
+plot(response_bio5only$x,response_bio5only$y)
+
+
+#PREDICCION GEOGRAFICA REFERENCE PERIOD EUROPA
+maxent.ref <- predict(me, vars_cat, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))# tragicamente hay que usar logistic output para tener los resultados en tanto por 1, las otras dos opciones estan relacionadas con dar menos peso a los puntos extrapolados. y son las que aparecen por defecto en MaXent.
+maxent.ref.avg <- mean(maxent.ref[["layer.1"]],maxent.ref[["layer.2"]],maxent.ref[["layer.3"]],
+                       maxent.ref[["layer.4"]],maxent.ref[["layer.5"]],maxent.ref[["layer.6"]],
+                       maxent.ref[["layer.7"]],maxent.ref[["layer.8"]],maxent.ref[["layer.9"]],
+                       maxent.ref[["layer.10"]])
+
+par(mfrow=c(1,1))
+plot(maxent.ref.avg, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+points(especie, pch=19, col="red", cex=0.8)
+points(especie.bg[especie.bg$presence==0,"x"], especie.bg[especie.bg$presence==0,"y" ], pch=19, cex=0.2, col="grey3")
+
+
+
+# GUARDAMOS EL RASTER DE IDONEIDAD PARA LA ESPECIE antes y despues de la sequ�???a
+writeRaster(maxent.ref.avg, filename= paste0("Model maxent/Outputs/Cat.tif"), format="GTiff", overwrite=TRUE)
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse después de calibrar el modelo con datos del periodo de referencia, pero as�??? ahorro espacio)
+especie_test <- read.table(paste0("AlertaForestal/cat_pback_test.csv"), sep=";", dec=".", header = T)
+
+especie_test$idoneidad <- extract(maxent.ref.avg, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+
+
+
+#### GLM CAT ####
+
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars<-variables[[c(2,5,6,12,15,17,18,19)]]
+vars_cat<-crop(vars,y=c(-0,4,40,43))
+
+europa.r<-raster("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Model GLM/Buffer/AsiaEuropa.tif")
+
+cat <- read.xlsx("AlertaForestal/AF_editat.xlsx")
+especie <- read.table(paste0("AlertaForestal/cat_pback_training.csv"), sep=";", dec=".", header = T)
+
+vars.table<-as.data.frame(extract(vars, especie[,c(4,3)]))
+especie <- cbind(especie,vars.table)
+
+# COLUMNA BACKGROUND PONDERADO
+#especie[especie$presence==0, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==0,])
+especie$peso <- extract(europa.r,especie[,c(4,3)])
+especie[especie$presence==1, "peso"] <- nrow(especie[especie$presence==1,])/nrow(especie[especie$presence==1,])
+
+# MODELO
+glm.backgroundw<-glm (presence ~  
+                        poly(CHELSA_anual_bio02, 2, raw=T) + poly(CHELSA_anual_bio05, 2, raw=T)  + poly(CHELSA_anual_bio06, 2, raw=T) + poly(CHELSA_anual_bio12,2, raw=T)+
+                        poly(CHELSA_anual_bio15,2, raw=T) + poly(CHELSA_anual_bio17,2, raw=T) + poly(CHELSA_anual_bio18,2, raw=T)+ poly(CHELSA_anual_bio19,2, raw=T), 
+                      family = binomial(link = "logit"), data=especie, weights=peso)
+glm.backgroundw<-glm (presence ~  
+                        poly(CHELSA_anual_bio02, 2, raw=T) + poly(CHELSA_anual_bio05, 2, raw=T)  + poly(CHELSA_anual_bio06, 2, raw=T) + poly(CHELSA_anual_bio12,2, raw=T)+
+                        poly(CHELSA_anual_bio15,2, raw=T) + poly(CHELSA_anual_bio17,2, raw=T) + poly(CHELSA_anual_bio18,2, raw=T)+ poly(CHELSA_anual_bio19,2, raw=T), 
+                      family = binomial(link = "logit"), data=especie)
+
+#resumen de los modelos
+summary.lm(glm.backgroundw)
+
+
+#DIBUJAMOS LAS CURVAS DE RESPUESTA
+par(mfrow=c(2,3))
+plotmo(glm.backgroundw, level=0.95, level.shade="skyblue2")
+
+#PREDICCION GEOGRAFICA EUROPA
+glm.backgroundw.ref<-predict(vars_cat, glm.backgroundw, type="response")
+par(mfrow=c(1,1))
+plot(glm.backgroundw.ref, main=paste0("Catalunya"))
+points(cat[,c(4,3)], pch=19, col="red", cex=0.8)
+
+
+# GUARDAMOS EL RASTER DE IDONEIDAD PARA LA ESPECIE antes y despues de la sequ�a
+writeRaster(glm.backgroundw.ref, filename= paste0("Model GLM/Cat.tif"), format="GTiff", overwrite=TRUE)
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse despu�s de calibrar el modelo con datos del periodo de referencia, pero as� ahorro espacio)
+especie_test <- read.table(paste0("AlertaForestal/cat_pback_test.csv"), sep=";", dec=".", header = T)
+
+especie_test$idoneidad <- extract(glm.backgroundw.ref, especie_test[, c("longitude","latitude")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+
