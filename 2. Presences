@@ -1,0 +1,380 @@
+####################################
+### Models Cydalima perspectalis ###
+####################################
+
+### 1. Variables climàtiques/ambientals doc:"1. Variables_Cp.R"
+### 2. Presencies
+### 3. Pseudoabsencies i background
+
+
+
+#load
+setwd("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/")
+
+library(raster) #TRABAJO CON DATOS RASTER
+library(HH) #VARIANCE INFLATION FACTOR
+library(rgeos) #OPERACIONES GEOMETRICAS CON INFO GEOGRAFICA
+library(dismo) #LIBRERIA PARA MODELOS DE DISTRIBUCION
+library(rgdal)
+library(sp)
+library(rasterVis)
+library(maptools)
+library(rJava)
+library(openxlsx)
+library(dplyr)
+
+ReduceSpatialClustering = function(data, minimum.distance){
+  #count rows
+  row<-1
+  
+  #repite la operacion hasta que se cumple la condicion de salida
+  repeat{
+    #contenido de la fila (para no tirar de toda la tabla en todas las operaciones)
+    f<-data[row, ]
+    
+    #genera los limites de la cuadricula de busqueda
+    ymax<-f$latitude + minimum.distance
+    ymin<-f$latitude - minimum.distance
+    xmax<-f$longitude + minimum.distance
+    xmin<-f$longitude - minimum.distance
+    
+    #selecciona de la tabla los datos con coordenadas dentro del rectangulo que no tienen las mismas coordenadas que la fila con la que estamos trabajando, y las elimina de la tabla
+    data<-data[!((data$latitude <= ymax) & (data$latitude >= ymin) & (data$longitude <= xmax) & (data$longitude >= xmin) & (data$latitude != f$latitude | data$longitude != f$longitude)), ]
+    
+    #estima de filas por procesar
+    print(paste("Processed rows: ", row, " out of ", nrow(data), sep=""))
+    
+    #suma 1 al contador de la fila
+    row<-row+1
+    
+    #condicion de salida cuando llega a la ultima fila
+    if(row>=nrow(data))break
+  }
+  
+  return(data)
+  
+}#cargamos ya la funcion y asi no nos olvidamos
+
+
+
+
+
+###############################################
+################ 2. Presències ################
+###############################################
+
+
+# Cargamos datos de la especie desde gbif
+
+#especie1 <- gbif("Cydalima", "perspectalis*", geo=T)
+#dim(especie1)
+#colnames(especie1)
+#write.xlsx(especie1, "gbif_Cyd.xlsx")
+
+# Cargamos datos de la especie desde CSV descargado
+especie1 <- read.xlsx("GBIF/gbif_original.xlsx")
+especie2 <- read.xlsx("GBIF/presencies_Wan2014.xlsx") #Especies de la literatura Wan 2014
+
+especie <- especie1[, c("datasetID", "lat", "lon", "year", "month","day","country","species",
+                        "originalNameUsage","scientificName","coordinatePrecision","coordinateUncertaintyInMeters")]
+especie <- rbind(especie, especie2)
+
+
+#Selecció de les dades EXPERT. Segons any i outliers
+eu2013<-subset(especie, especie$lon>-25 & especie$lon<50 & especie$lat>30 & especie$year<=2013)
+especie <- anti_join(especie,eu2013)
+
+euLAT<-subset(especie, especie$lon>-25 & especie$lon<50 & especie$lat>30 & especie$lat>57)
+especie <- anti_join(especie, euLAT)
+
+
+# Cargamos datos de las variables climáticas
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+variables <- stack(lista.variables)
+vars_def <- variables[[c("CHELSA_anual_bio02", "CHELSA_anual_bio05", "CHELSA_anual_bio06", "CHELSA_anual_bio12")]]
+
+especie[,c(13:16)]<-extract(vars_def,especie[,c(3,2)])
+colnames(especie)[c(13:16)]<-names(vars_def)
+
+
+
+
+## 1.1 LIMPIEZA DE TABLA
+# Els calculs es fan amb "especie" i quan sigui necessari es mira el cas concret d'Àsia i Europa
+
+
+### Quitamos las filas que no tengan coordenadas
+especie<-especie[!is.na(especie$lat), ]
+especie<-especie[!is.na(especie$lon), ]
+table(is.na(especie$lat))
+table(is.na(especie$lat[!is.na(especie$lon)]))#para ver si hay valores con una sola de las dos coordenadas
+
+
+### Quitamos todos los registros que quedan fuera del area de trabajo o que tienen valores nulos para las variables
+table(is.na(especie$CHELSA_anual_bio12))
+especie<-especie[!(is.na(especie$CHELSA_anual_bio12)), ]
+
+
+### Quitamos otras especies (si las hay)
+table(especie$scientificName)
+table(especie$originalNameUsage)
+#No eliminem cap entrada ja que tots els noms són sinònims de Cp
+#d<-d[!(d$A=="B" & d$E==0),]
+# ponemos un unico nombre a la columna de scientificName
+especie$scientificName<-"Cydalima perspectalis"
+especie$originalNameUsage<-"Cydalima perspectalis"
+
+
+### Filtrado por resolucion espacial de los registros
+# Los pasamos a numericos
+especie$coordinatePrecision<-as.numeric(especie$coordinatePrecision)
+especie$coordinateUncertaintyInMeters<-as.numeric(especie$coordinateUncertaintyInMeters)
+
+# Datos con NA
+# Separem les dades d'Europa i les de Àsia ja que farem dos models.
+europa<-subset(especie, especie$lon>-25 & especie$lon<50 & especie$lat>30)
+asia <- subset(especie, especie$lon>100)
+
+table(is.na(europa$coordinatePrecision | europa$coordinateUncertaintyInMeters))# todos los datos tienen precision en la coordenada
+plot(europa$lon,europa$lat, pch=20, col="red")
+points(europa[is.na(europa$coordinateUncertaintyInMeters), ]$lon, europa[is.na(europa$coordinateUncertaintyInMeters), ]$lat, col="green", cex=0.75)
+
+table(is.na(asia$coordinatePrecision | asia$coordinateUncertaintyInMeters))# todos los datos tienen precision en la coordenada
+plot(asia$lon,asia$lat, pch=20, col="red")
+points(asia[is.na(asia$coordinateUncertaintyInMeters), ]$lon, asia[is.na(asia$coordinateUncertaintyInMeters), ]$lat, col="green", cex=0.75)
+
+# En el caso de Asia, perdemos demasiada informacion. Decidimos si eliminar o no los puntos sin precision
+# eliminamos los datos que no tengan precision en la coordenada en Europa
+europa<-europa[!(is.na(europa$coordinatePrecision | europa$coordinateUncertaintyInMeters)), ]
+
+# Datos en funcion de la precision
+length(europa$coordinatePrecision[europa$coordinatePrecision<=707])# segun esto existen 7217 puntos con una precision de pixel mejor de 1 km2
+length(europa$coordinateUncertaintyInMeters[europa$coordinateUncertaintyInMeters<=1000])
+length(europa$coordinatePrecision[europa$coordinatePrecision<=7071])
+length(europa$coordinateUncertaintyInMeters[europa$coordinateUncertaintyInMeters<=10000])
+
+length(asia$coordinatePrecision[asia$coordinatePrecision<=707])
+length(asia$coordinateUncertaintyInMeters[asia$coordinateUncertaintyInMeters<=1000])# segun esto existen 64 puntos con una precision de pixel mejor de 1 km2
+length(asia$coordinatePrecision[asia$coordinatePrecision<=7071])
+length(asia$coordinateUncertaintyInMeters[asia$coordinateUncertaintyInMeters<=10000])
+
+# En el caso de Asia, perdemos demasiada informacion. Decidimos si eliminar o no los puntos con poca precision
+# eliminamos los datos con mala precision en la coordenada en Europa
+europa<-subset(europa, europa$coordinateUncertaintyInMeters<=10000|europa$coordinatePrecision<=7071)     #europa$coordinateUncertaintyInMeters <= 10000, ] 
+
+#Reajuntamos especie<-asia+europa
+especie<-rbind(europa,asia)
+
+
+
+###Autocorrelacion: separacion de las presencias por una distancia mínima
+#veamos la resolucion de las variables
+xres(vars_def)
+yres(vars_def)
+res.grados<-xres(vars_def)
+#numero de celdas vacias que vamos a dejar entre un punto y el siguiente
+celdas.vacias<-1
+#distancia minima entre puntos consecutivos
+distancia.minima<-res.grados*celdas.vacias
+#A ¿cuanto es eso en km?
+distancia.minima*111.19
+
+#EMPEZAMOS UN PLOT PARA VER EL EFECTO DE LA FUNCION 
+plot(vars_def[[1]], col="gray80", ext= c(-10, 50, 35, 75))
+points(especie$lon,especie$lat, pch=20, cex=0.75)
+
+#APLICAMOS FUNCION PARA REDUCIR LA DISTANCIA ENTRE PUNTOS
+#las columnas de coordenadas deben llamarse "latitude" y "longitude"
+colnames(especie)[2]<-"latitude"
+colnames(especie)[3]<-"longitude"
+
+#apliquemos la funcion a los datos
+especie_cor <- ReduceSpatialClustering(data=especie, minimum.distance=distancia.minima)
+
+#TERMINAMOS EL PLOT
+points(points(especie_cor$longitude,especie_cor$latitude, col="red", cex=0.75)) 
+#en este caso comprobamos que no se pierde deamsia densidad (de hecho, no se pierde nada pq deben estar ya mas alejados de 1km).
+
+#decidimos aplicar la funcion a la matriz pq no se pierden demasiados datos
+especie <- especie_cor
+
+
+
+
+## 1.2 LIMPIEZA DE DUPLICADOS EN LAS COORDENADAS
+#buscamos registros duplicados en las coordenadas
+especie$dupl<-duplicated(especie[ , c("latitude", "longitude")])
+#¿cuantos duplicados hay?
+table(especie$dupl)
+
+especie_dupl<-subset(especie, especie$dupl=="FALSE")
+
+plot(vars_def[[1]], col="gray80", ext=c(90, 160, 15, 50))
+points(especie$longitude,especie$latitude, pch=20, cex=0.75)
+points(especie_dupl$longitude,especie_dupl$latitude, cex=0.7, col="green")#confirmamos que todo es correcto
+
+plot(vars_def[[1]], col="gray80", ext=c(-10, 50, 35, 75))
+points(especie$longitude,especie$latitude, pch=20, cex=0.75)
+points(especie_dupl$longitude,especie_dupl$latitude, cex=0.7, col="green")#confirmamos que todo es correcto
+
+#taula sense duplicats
+especie <- especie_dupl
+
+
+
+
+#### TENEMOS LOS DATOS LIMPIOS!!!
+
+### GUARDAMOS
+especie$presence<-1
+especie<-data.frame(especie$scientificName, especie$longitude, especie$latitude, especie$year,especie$month,especie$country,especie$presence)
+names(especie)<-c("specie","x","y", "year","month","country","presence")
+
+write.xlsx(especie, "GBIF/gbif_editat.xlsx")
+
+europa<-subset(especie, especie$x>-25 & especie$x<50 & especie$y>30)
+asia <- subset(especie, especie$x>100)
+write.xlsx(europa, "GBIF/europa.xlsx")
+write.xlsx(asia, "GBIF/asia.xlsx")
+
+### GUARDAMOS PARA MAXENT!
+#crea presencia maxent
+especie.maxent<-especie[,c(1,2,3)]
+names(especie.maxent)<-c("Species","Lon","Lat")
+write.table(especie.maxent, file="GBIF/gbif_maxent.csv", sep=",", row.names=FALSE, quote=FALSE)
+
+europa.maxent<-subset(especie.maxent, especie.maxent$Lon> -25 & especie.maxent$Lon <50 & especie.maxent$Lat>30)
+asia.maxent <- subset(especie.maxent, especie.maxent$Lon>100)
+write.table(europa.maxent, file="GBIF/europa_maxent.csv", sep=",", row.names=FALSE, quote=FALSE)
+write.table(asia.maxent, file="GBIF/asia_maxent.csv", sep=",", row.names=FALSE, quote=FALSE)
+
+
+
+#-------------------------------------------------------------------------------------------------
+
+
+
+
+
+###########################################################################
+################ 3. PREPARACION BACKGROUN Y PSEUDOAUSENCIA ################
+###########################################################################
+
+#load
+europa <- read.xlsx("GBIF/europa.xlsx")
+asia <- read.xlsx("GBIF/asia.xlsx")
+
+# Cargamos datos de las variables climáticas
+load("Variables climatiques/variables.RData")
+vars_europa<-crop(vars,y=c(-15,50,35,75))
+vars_asia<-crop(vars,y=c(95,150,20,45))
+
+
+########### GENERAMOS LOS PUNTOS DE BACKGROUND
+#Los puntos de background los seleccionamos a un buffer de 100km(~1º) alrededor de cada presencia
+asia.shp <- SpatialPointsDataFrame(coords = asia[,c(2,3)], data = asia,proj4string = crs(vars_asia))
+buffer.asia <- gBuffer(asia.shp, 1, byid=T, id=1:nrow(asia.shp))
+
+europa.shp <- SpatialPointsDataFrame(coords = europa[,c(2,3)], data = europa ,proj4string = crs(vars_europa))
+buffer.europa <- gBuffer(europa.shp, 1, byid=T, id=1:nrow(europa.shp))
+
+#se suele considerar que el background es suficiente con el 10 o 20% del total de puntos de las capa climáticas.
+#Aunque en bibliografia se considera suficiente con 10000
+#Per les PSEUDOABSÈNCIES n'hi ha prou amb el mateix nombre de presències
+bg_europa <- as.data.frame(randomPoints(mask=vars_europa, n=10000),xy=T)
+bg_asia <- as.data.frame(randomPoints(mask=vars_asia, n=10000),xy=T)
+
+bg_europa<- as.data.frame(sampleRandom(mask(vars_europa[[1]],buffer.europa),25000,xy=T))
+bg_asia<- as.data.frame(sampleRandom(mask(vars_asia[[1]],buffer.asia),150000,xy=T))
+
+#le añadimos la columna de presencia
+bg_europa$presence<-0
+bg_asia$presence<-0
+
+#le añadimos la columna de especie
+bg_europa$specie<- "Cydalima perspectalis"
+bg_asia$specie<- "Cydalima perspectalis"
+
+#le añadimos las columnas que faltan
+bg_europa$V6<-0
+bg_asia$V6<-0
+
+#Ordenar
+bg_europa<-data.frame(bg_europa$specie,bg_europa$x,bg_europa$y,bg_europa$V6,bg_europa$V6,bg_europa$V6,bg_europa$presence)
+colnames(bg_europa)<-c("specie","x","y","year","month","country","presence" )
+bg_asia<-data.frame(bg_asia$specie,bg_asia$x,bg_asia$y,bg_asia$V6,bg_asia$V6,bg_asia$V6,bg_asia$presence)
+colnames(bg_asia)<-c("specie","x","y","year","month","country","presence" )
+
+
+#unimos las presencias y el background en una unica tabla
+europa_all<-rbind(europa, bg_europa)
+asia_all<-rbind(asia, bg_asia)
+
+#guardamos la tabla
+write.xlsx(europa_all, "GBIF/europa_all_random.xlsx")
+write.xlsx(asia_all, "GBIF/asia_all_random.xlsx")
+
+write.xlsx(europa_all, "GBIF/europa_all_buffer.xlsx")
+write.xlsx(asia_all, "GBIF/asia_all_buffer.xlsx")
+
+
+
+
+
+
+
+
+
+######################### SEPARAMOS TRAINING Y TEST DATA #######
+
+#### separamos training y test para presence background y presence.only
+cont<-c("asia","europa")
+met <- c("random","buffer")
+
+for (i in 1:2){
+  for (j in 1:2){
+    especie <- read.xlsx(paste0("GBIF/",cont[i],"_all_",met[j],".xlsx"))
+    
+    #PORCENTAJE DE PRESENCIAS A UTILIZAR
+    porcentaje<-30 # Huberty 1994, sugiere un ratio 70:30 para 6 variables predictoras y de 75:25 para más de 10, de acuerdo con la formula que propone en el articulo
+    #calcula numero de datos y porcentaje de particion
+    presencias <- especie[especie$presence==1, ]
+    ausencias <- especie[!especie$presence==1, ]
+    numero.presencias.total <- nrow(presencias)
+    numero.ausencias.total <- nrow(ausencias)
+    numero.presencias.evaluacion<-round((porcentaje*numero.presencias.total)/100)# para decidir cuantas presencias en cada caso
+    numero.ausencias.evaluacion<-numero.presencias.evaluacion
+    
+    muestra.presencia<-sample(numero.presencias.total, numero.presencias.evaluacion)
+    muestra.ausencia<-sample(numero.ausencias.total, numero.ausencias.evaluacion)+numero.presencias.total
+    
+    #GENERAMOS FICHERO DE EVALUACIóN
+    especie_pback_test <- especie[c(muestra.presencia,muestra.ausencia), ]
+    especie_only_test <- presencias[muestra.presencia, ]
+    
+    #GENERAMOS FICHERO DE CALIBRADO
+    especie_pback_training <- especie[-c(muestra.presencia,muestra.ausencia), ]
+    especie_only_training <- presencias[-muestra.presencia, ]
+    
+    write.table(especie_pback_test, paste0("GBIF/",cont[i],"_pback_test_",met[j],".csv"), row.names=FALSE, col.names=TRUE, sep=";")
+    write.table(especie_pback_training, paste0("GBIF/",cont[i],"_pback_training_",met[j],".csv"), row.names=FALSE, col.names=TRUE, sep=";")
+    write.table(especie_only_test, paste0("GBIF/",cont[i],"_only_test_",met[j],".csv"), row.names=FALSE, col.names=TRUE, sep=";")
+    write.table(especie_only_training, paste0("GBIF/",cont[i],"_only_training_",met[j],".csv"), row.names=FALSE, col.names=TRUE, sep=";")
+  
+    
+    #PSEUDABSENCIES
+    #GENERAMOS FICHERO DE EVALUACIóN
+    presencia.evaluacion<-presencias[muestra.presencia, ]
+    ausencia.evaluacion<-ausencias[muestra.ausencia, ]
+    test<-rbind(presencia.evaluacion,ausencia.evaluacion)
+    
+    #GENERAMOS FICHERO DE CALIBRADO
+    presencia.training<-presencias[-muestra.presencia, ]
+    ausencia.training<-ausencias[-muestra.ausencia, ]
+    training <- rbind(presencia.training,ausencia.training)
+    
+    write.table(test, paste0("GBIF/",cont[i],"_pseudo_test",met[j],".csv"), row.names=FALSE, col.names=TRUE, sep=";")
+    write.table(training, paste0("GBIF/",cont[i],"_pseudo_training",met[j],".csv"), row.names=FALSE, col.names=TRUE, sep=";")
+
+  }
+}
