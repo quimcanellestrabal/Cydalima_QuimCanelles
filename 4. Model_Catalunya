@@ -1,0 +1,855 @@
+################################################
+### Models Cydalima perspectalis a Catalunya ###
+################################################
+
+### 1. Presencies AF
+### 2. Pseudoabsencies i background
+### 3. Variables ambientals
+
+
+
+#load
+setwd("C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/")
+
+library(raster) #TRABAJO CON DATOS RASTER
+library(HH) #VARIANCE INFLATION FACTOR
+library(rgeos) #OPERACIONES GEOMETRICAS CON INFO GEOGRAFICA
+library(dismo) #LIBRERIA PARA MODELOS DE DISTRIBUCION
+library(plotmo) #LIBRERIA PARA VISUALIZAR CURVAS RESPUESTA
+library(rgdal)
+library(sp)
+library(rasterVis)
+library(maptools)
+library(rJava)
+library(openxlsx)
+library(geosphere)
+library(MuMIn) #AIC
+library(dplyr)
+library(spatialEco)
+library(caret) #kfold validation
+
+ReduceSpatialClustering = function(data, minimum.distance){
+  #count rows
+  row<-1
+  
+  #repite la operacion hasta que se cumple la condicion de salida
+  repeat{
+    #contenido de la fila (para no tirar de toda la tabla en todas las operaciones)
+    f<-data[row, ]
+    
+    #genera los limites de la cuadricula de busqueda
+    ymax<-f$UTMY + minimum.distance
+    ymin<-f$UTMY - minimum.distance
+    xmax<-f$UTMX + minimum.distance
+    xmin<-f$UTMX - minimum.distance
+    
+    #selecciona de la tabla los datos con coordenadas dentro del rectangulo que no tienen las mismas coordenadas que la fila con la que estamos trabajando, y las elimina de la tabla
+    data<-data[!((data$UTMY <= ymax) & (data$UTMY >= ymin) & (data$UTMX <= xmax) & (data$UTMX >= xmin) & (data$UTMY != f$UTMY | data$UTMX != f$UTMX)), ]
+    
+    #estima de filas por procesar
+    print(paste("Processed rows: ", row, " out of ", nrow(data), sep=""))
+    
+    #suma 1 al contador de la fila
+    row<-row+1
+    
+    #condicion de salida cuando llega a la ultima fila
+    if(row>=nrow(data))break
+  }
+  
+  return(data)
+  
+}#cargamos ya la funcion y asi no nos olvidamos
+
+
+
+###############################
+### 0. Correlació variables ###
+###############################
+
+aspect <- as.factor(raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc"))
+crs(aspect) <- CRS("+init=epsg:25831")
+DEM <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Elevacions/DEM_100m.asc")
+crs(DEM) <- CRS("+init=epsg:25831")
+SDM <- raster("Model GLM/random i Wan14/Europa.tif")
+SDM <- projectRaster(SDM,aspect)
+pg_boixos <- raster("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Buxus/Buxus_pg.tif")
+AB <- raster("AlertaForestal/Input raster/AB.tif")
+bosc_pg <- raster ("AlertaForestal/Input raster/bosc_pg.tif")
+dist_2018high <- raster("AlertaForestal/Input raster/dist_2018high.tif")
+dist_2019high <- raster("AlertaForestal/Input raster/dist_2019high.tif")
+dist_2018 <- raster("AlertaForestal/Input raster/dist_2018.tif")
+dist_2019 <- raster("AlertaForestal/Input raster/dist_2019.tif")
+fragment <- raster("Fragmentacio habitat/fragment_cat1000.tif")
+hetero <- raster("Fragmentacio habitat/hetero_cat1000.tif")
+
+predictors <- stack(aspect,DEM,SDM,pg_boixos,dist_2018,dist_2019,dist_2018high,dist_2019high,bosc_pg,AB)
+
+
+variables.tabla<- as.data.frame(sampleRandom(predictors,2000,xy=F))
+variables.tabla<-na.omit(variables.tabla)
+
+cor(variables.tabla)
+cor(na.omit(fragment[]),na.omit(hetero[]))
+
+
+######################################
+### 1.  Presencies Alerta Forestal ###
+######################################
+
+AF<-read.xlsx("AlertaForestal/AF_brut.xlsx")
+AF<-subset(AF, AF$year==2019)
+AF<-subset(AF, AF$Font!="XarxaVigilancia")
+AF <- AF[AF$ID!=c("pres_567"),] #no és Cydalima
+names(AF)
+
+AFgeo <- SpatialPoints(AF[,c(7,6)], proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 ") )
+AFutm <- as.data.frame(spTransform(AFgeo, CRS("+init=epsg:25831 +proj=utm +zone=31 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs ")))
+colnames(AFutm)<-c("UTMX","UTMY")
+AF<-cbind(AF, AFutm)
+
+#Dades agents rurals
+AR<-read.xlsx("C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/Dades Agents Rurals/AR_brut.xlsx")
+AR$UTMX<-as.numeric(as.character(AR$UTMX))
+AR$UTMY<-as.numeric(as.character(AR$UTMY))
+AR<-subset(AR, AR$year==2019)
+AF<-rbind(AF,AR)
+
+aspect <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Catalunya/Aspect/Aspect_100m_31N-ETRS89.asc")
+crs(aspect) <- CRS("+init=epsg:25831")
+AF$aspect<-extract(aspect,AF[,c(13,14)])
+plot(aspect, col="gray80")
+points(AF$UTMX ,AF$UTMY, pch=20, cex=0.75)
+
+
+### Quitamos las filas que no tengan coordenadas
+AF<-AF[!is.na(AF$UTMX), ]
+AF<-AF[!is.na(AF$UTMY), ]
+
+### Quitamos todos los registros que quedan fuera del area de trabajo
+AF<-AF[!(is.na(AF$aspect)), ]
+
+###Autocorrelacion: separacion de las presencias por una distancia mínima
+#veamos la resolucion de las variables
+xres(aspect)
+yres(aspect)
+res.grados<-xres(aspect)
+#numero de celdas vacias que vamos a dejar entre un punto y el siguiente
+celdas.vacias<-1
+#distancia minima entre puntos consecutivos
+distancia.minima<-res.grados*celdas.vacias
+#A ¿cuanto es eso en km?
+distancia.minima*0.001
+#APLICAMOS FUNCION PARA REDUCIR LA DISTANCIA ENTRE PUNTOS
+AF_cor <- ReduceSpatialClustering(data=AF, minimum.distance=distancia.minima)
+#TERMINAMOS EL PLOT
+points(points(AF_cor$UTMX,AF_cor$UTMY, col="red", cex=0.75)) 
+
+#Guardar
+write.xlsx(AF_cor,"AlertaForestal/AF_editat.xlsx")
+
+
+
+
+
+########################################
+### 2.  Pseudoabsencies i background ###
+########################################
+
+AF_cor<-read.xlsx("AlertaForestal/AF_editat.xlsx")
+AF_cor<-subset(AF_cor, AF_cor$description!="Nulla")
+names(AF_cor)
+aspect <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc")
+crs(aspect) <- CRS("+init=epsg:25831")
+
+
+#Los puntos de background los seleccionamos a un buffer de 10km alrededor de cada presencia  #es decideix no fer, vegeu Metodologia Cydalima.docs
+#cat.shp <- SpatialPointsDataFrame(coords = AF_cor[,c(13,14)], data = AF_cor, proj4string = crs(aspect))
+#buffer.cat <- gBuffer(cat.shp, 10000, byid=T, id=1:nrow(cat.shp))
+#bg_cat<- as.data.frame(sampleRandom(mask(aspect,buffer.cat),10000,xy=T)) #es decideix no fer, vegeu Metodologia Cydalima.docs
+
+#se suele considerar que el background es suficiente con el 10 o 20% del total de puntos de las capa climáticas.
+#Aunque en bibliografia se considera suficiente con 10000
+#Per les PSEUDOABSÈNCIES n'hi ha prou amb el mateix nombre de presències
+bg_cat <- as.data.frame(randomPoints(mask=aspect, n=10000),xy=T)
+
+
+#le añadimos la columna de presencia
+bg_cat$presence<-0
+AF_cor$presence<-1
+
+#le añadimos las columnas que faltan
+bg_cat$v5<-0
+
+#Ordenar
+bg_cat<-bg_cat[,c(4,4,4,4,4,4,4,4,4,4,4,4,1,2,3,4)]
+colnames(bg_cat)<-colnames(AF_cor)
+bg_cat$ID<-paste0("bg_",c(1:nrow(bg_cat)))
+
+#unimos las presencias y el background en una unica tabla
+cat_all<-rbind(AF_cor, bg_cat)
+
+#plot
+plot(aspect, col="gray80")
+points(bg_cat$UTMX, bg_cat$UTMY, pch=20, cex=0.75)
+points(AF_cor$UTMX, AF_cor$UTMY, pch=20, col="red")
+
+#guardamos la tabla
+write.xlsx(cat_all, "AlertaForestal/AFeditat_all.xlsx")
+
+
+
+
+
+#########################
+### 3. Preparar dades ###
+#########################
+
+#1. Presències/absències
+#carregar el document definitiu amb presències i absèncices "AFeditat_all"
+AF<-read.xlsx("AlertaForestal/AFeditat_all.xlsx")
+names(AF)
+#Absencies reals segons els agents rurals
+#AF<-read.xlsx("AlertaForestal/AF_editat.xlsx")
+#AF$presence<-ifelse(AF$description=="Nulla",0,1)
+
+#2. Variables topografiques
+aspect <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc")
+crs(aspect) <- CRS("+init=epsg:25831")
+AF$aspect<-extract(aspect, AF[,c(13,14)])
+
+DEM <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Elevacions/DEM_100m.asc")
+crs(DEM) <- CRS("+init=epsg:25831")
+#DEM<-scale(DEM)
+AF$DEM<-extract(DEM, AF[,c(13,14)])
+table(is.na(AF$DEM))
+boxplot(AF$DEM ~ AF$presence, main="DEM")
+
+
+#3. Variable SDM
+#carregar SDM definitiu, ja sigui amb random points, buffer, fet amb glm o amb MaxEnt
+SDM <- raster("Model GLM/random i Wan14/Europa.tif")
+SDMutm<-projectRaster(SDM,aspect)
+#SDMutm<-scale(SDMutm)
+plot(SDMutm)
+AF$SDM<-extract(SDMutm, AF[,c(13,14)])
+table(is.na(AF$SDM))
+AF<- AF[!is.na(AF$SDM),] #Treure els valors NA
+boxplot(AF$SDM ~ AF$presence, main="SDM")
+
+
+#4. Variable boix
+boix<- read.xlsx("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Buxus/buxus_cat.xlsx")
+names(boix)
+
+#buxus_abundancia<-raster("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Buxus/Buxus_agg.tif")
+#buxus_abundancia<-scale(buxus_abundancia)
+buxus_pg <- raster("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Buxus/Buxus_pg.tif")
+plot(buxus_pg)
+#buxus_pg<-scale(buxus_pg)
+#AF$n_boixos<-extract(buxus_abundancia, AF[,c(13,14)])
+AF$pg_boixos<-extract(buxus_pg, AF[,c(13,14)])
+#table(is.na(AF$n_boixos))
+table(is.na(AF$pg_boixos))
+boxplot(AF$pg_boixos ~ AF$presence, main="% boixos")
+
+
+#5. Distància entre punts
+AF_presencies<-read.xlsx("AlertaForestal/AF_brut.xlsx")
+AR<-read.xlsx("C:/Users/quim.canelles/Documents/Cydalima/Dades Agents Rurals/AR_brut.xlsx")
+AR$longitude<-as.numeric(as.character(AR$UTMX))
+AR$latitude<-as.numeric(as.character(AR$UTMY))
+AR<-subset(AR, AR$description!="Nulla")
+
+AFgeo <- SpatialPoints(AF_presencies[,c(7,6)], proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 ") )
+AFutm <- as.data.frame(spTransform(AFgeo, CRS("+init=epsg:25831 +proj=utm +zone=31 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs ")))
+
+AF_2018<-subset(AFutm, AF_presencies$year==2018)
+AF_2019<-subset(AFutm, AF_presencies$year==2019)
+AR_2018<-subset(AR, AR$year==2018)
+AR_2019<-subset(AR, AR$year==2019)
+AF_2018<-rbind(AF_2018, AR_2018[,c(6,7)])
+AF_2019<-rbind(AF_2018, AR_2019[,c(6,7)])
+
+aspect <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc")
+crs(aspect) <- CRS("+init=epsg:25831")
+aspect1000 <- aggregate(aspect, fact=10, fun=mean)
+taula <- as.data.frame(aspect1000, xy=T)
+taula$dst2018<-0
+taula$dst2019<-0
+for (i in 1:nrow(taula)){
+  taula$dst2018[i] <- min(pointDistance(taula[i,c(1,2)],AF_2018, lonlat=F))
+  taula$dst2019[i] <- min(pointDistance(taula[i,c(1,2)],AF_2019, lonlat=F))
+  print(paste0(i," of ",nrow(taula)))
+}
+dist_2018 <- rasterFromXYZ(taula[,c(1,2,4)])
+dist_2018 <- disaggregate(dist_2018, fact=10)
+writeRaster(dist_2018, filename ="AlertaForestal/Input raster/dist_2018.tif",format="GTiff", overwrite=TRUE)
+dist_2019 <- rasterFromXYZ(taula[,c(1,2,5)])
+dist_2019 <- disaggregate(dist_2019, fact=10)
+writeRaster(dist_2019, filename ="AlertaForestal/Input raster/dist_2019.tif",format="GTiff", overwrite=TRUE)
+
+dist_2018 <- raster("AlertaForestal/Input raster/dist_2018.tif")
+#dist_2018<-scale(dist_2018) #no es pot estandaritzar perquè es tracta de distàncies. Les distàncies petites (0) passen a ser negatives
+plot(dist_2018)
+dist_2019 <- raster("AlertaForestal/Input raster/dist_2019.tif")
+#dist_2019<-scale(dist_2019) #no es pot estandaritzar perquè es tracta de distàncies. Les distàncies petites (0) passen a ser negatives
+plot(dist_2019)
+
+AF$dist_2018 <- extract(dist_2018, AF[,c(13,14)])
+AF$dist_2019 <- extract(dist_2019, AF[,c(13,14)])
+boxplot(AF$dist_2018 ~ AF$presence, main="dist_2018")
+
+
+#6. Distancia als punts d'alta intensitat
+AF_presencies<-read.xlsx("AlertaForestal/AF_brut.xlsx")
+AFgeo <- SpatialPoints(AF_presencies[,c(7,6)], proj4string=CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0 ") )
+AFutm <- as.data.frame(spTransform(AFgeo, CRS("+init=epsg:25831 +proj=utm +zone=31 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs ")))
+AF_2018_high <- subset(AFutm, (AF_presencies$description=="Molt Alta") & AF_presencies$year==2018)
+AF_2018_high <- subset(AF_2018_high, AF_2018_high$latitude>4620000)
+AF_2019_high <- subset(AFutm, (AF_presencies$description=="Molt Alta") & AF_presencies$year==2019)
+AF_2019_high <- subset(AF_2019_high, AF_2019_high$longitude>400000 & AF_2019_high$latitude>4600000)
+
+AR<-read.xlsx("C:/Users/quim.canelles/Documents/Cydalima/Dades Agents Rurals/AR_brut.xlsx")
+AR$longitude<-as.numeric(as.character(AR$UTMX))
+AR$latitude<-as.numeric(as.character(AR$UTMY))
+AR_2018_high<-subset(AR, AR$description=="Molt Alta" & AR$year==2018)
+AR_2019_high<-subset(AR, AR$description=="Molt Alta" & AR$X.column.=="SEVER" & AR$year==2019)
+
+AF_2018_high<-rbind(AF_2018_high,AR_2018_high[,c(6,7)])
+AF_2019_high<-rbind(AF_2019_high,AR_2019_high[,c(6,7)])
+
+aspect <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc")
+crs(aspect) <- CRS("+init=epsg:25831")
+aspect1000 <- aggregate(aspect, fact=10, fun=mean)
+taula <- as.data.frame(aspect1000, xy=T)
+taula$dst2018high<-0
+taula$dst2019high<-0
+
+for (i in 1:nrow(taula)){
+  taula$dst2018high[i] <- min(pointDistance(taula[i,c(1,2)],AF_2018_high, lonlat=F))
+  taula$dst2019high[i] <- min(pointDistance(taula[i,c(1,2)],AF_2019_high, lonlat=F))
+  print(paste0(i," of ",nrow(taula)))
+}
+
+dist_2018high <- rasterFromXYZ(taula[,c(1,2,4)])
+dist_2018high <- disaggregate(dist_2018high, fact=10)
+writeRaster(dist_2018high, filename ="AlertaForestal/Input raster/dist_2018high.tif",format="GTiff", overwrite=TRUE)
+
+dist_2019high <- rasterFromXYZ(taula[,c(1,2,5)])
+dist_2019high <- disaggregate(dist_2019high, fact=10)
+writeRaster(dist_2019high, filename ="AlertaForestal/Input raster/dist_2019high.tif",format="GTiff", overwrite=TRUE)
+
+
+dist_2018high <- raster("AlertaForestal/Input raster/dist_2018high.tif")
+plot(dist_2018high, main="dist_2018high")
+AF$dist_2018high <- extract(dist_2018high, AF[,c(13,14)])
+table(is.na(AF$dist_2018high))
+boxplot(AF$dist_2018high ~ AF$presence, main="dist_2018high")
+
+#7. cobertura de bosc
+BA <- raster("C:/Users/quim.canelles/Documents/Dades/Variables Biofisiques CREAF/ToPhagoBA0_100m_31N-ETRS89.asc")
+BAcat <- reclassify(BA, rcl=matrix(c(0,0.5,0.5,1000,0,1),ncol=3))
+
+
+w<-focalWeight(BAcat,1000,type="circle")
+w[11,11]<-0
+w[w==1/317]<-1/316
+
+BAwindow_r<-focal(BA,w=w,fun=sum,na.rm=T)
+BAwindow_r[is.na(BAwindow_r)] <- 0
+plot(BAwindow_r, main="BAwindow_r")
+writeRaster(BAwindow_r, filename ="AlertaForestal/Input raster/AB.tif",format="GTiff", overwrite=TRUE)
+BAcatwindow_r<-focal(BAcat,w=w,fun=sum,na.rm=T)
+BAcatwindow_r[is.na(BAcatwindow_r)] <- 0
+plot(BAcatwindow_r, main="BAcatwindow_r")
+writeRaster(BAcatwindow_r, filename ="AlertaForestal/Input raster/bosc_pg.tif",format="GTiff", overwrite=TRUE)
+
+BAwindow_r <- raster("AlertaForestal/Input raster/AB.tif")
+#BAwindow_r<-scale(BAwindow_r)
+BAcatwindow_r <- raster ("AlertaForestal/Input raster/bosc_pg.tif")
+#BAcatwindow_r<-scale(BAcatwindow_r)
+BAcatwindow_r <- raster.invert(BAcatwindow_r) #per indicar la falta de bosc!
+
+AF$bosc_pg<-extract(BAcatwindow_r, AF[,c(13,14)])
+AF$AB<-extract(BAwindow_r, AF[,c(13,14)])
+table(is.na(AF$bosc_pg))
+table(is.na(AF$AB))
+boxplot(AF$bosc_pg ~ AF$presence, main="% no bosc")
+boxplot(AF$AB ~ AF$presence, main="AF")
+
+
+#8. Variables de paisatge
+hetero_r <- raster("Fragmentacio habitat/hetero_cat1000.tif")
+fragment_r <- raster("Fragmentacio habitat/fragment_cat1000.tif")
+
+AF$hetero<-extract(hetero_r, AF[,c(13,14)])
+AF$fragment<-extract(fragment_r, AF[,c(13,14)])
+
+table(is.na(AF$hetero))
+table(is.na(AF$fragment))
+AF <- AF[!is.na(AF$hetero), ]
+
+boxplot(AF$hetero ~ AF$presence, main="heterogeneitat")
+boxplot(AF$fragment ~ AF$presence, main="Fragmentacio")
+
+
+
+write.xlsx(AF, "AlertaForestal/AF_Model.xlsx")
+write.xlsx(AF, "AlertaForestal/AF_Model_pseudoab.xlsx") #*Si es fan servir dades amb pseudo-absències ("AFeditat_all")
+
+
+
+
+
+
+
+#########################################
+### 5. SEPARAR PUNTS PER LA VALIDACIÓ ##
+#########################################
+
+### Pseudabsències i background
+#*Només si es fan servir dades amb pseudo-absències (AFeditat_all i AF_Model_all)
+
+cat_all<-read.xlsx("AlertaForestal/AF_Model_pseudoab.xlsx")
+
+#PORCENTAJE DE PRESENCIAS A UTILIZAR
+porcentaje<-30 # Huberty 1994, sugiere un ratio 70:30 para 6 variables predictoras y de 75:25 para más de 10, de acuerdo con la formula que propone en el articulo
+
+#calcula numero de datos y porcentaje de particion
+presencias <- cat_all[cat_all$presence==1, ]
+ausencias <- cat_all[!cat_all$presence==1, ]
+numero.presencias.total<-nrow(presencias)
+numero.ausencias.total<- nrow(ausencias)
+numero.presencias.evaluacion<-round((porcentaje*numero.presencias.total)/100)# para decidir cuantas presencias en cada caso
+numero.ausencias.evaluacion<-numero.presencias.evaluacion
+
+muestra.presencia<-sample_n(presencias, numero.presencias.evaluacion)
+muestra.ausencia<-sample_n(ausencias, numero.ausencias.evaluacion)
+
+#GENERAMOS FICHERO DE EVALUACIóN
+especie_pback_test <- rbind(muestra.presencia,muestra.ausencia)
+especie_only_test <- muestra.presencia
+
+#GENERAMOS FICHERO DE CALIBRADO
+especie_pback_training <- anti_join(cat_all, especie_pback_test)
+especie_only_training <- anti_join(presencias, especie_only_test)
+
+write.csv(especie_pback_test, paste0("AlertaForestal/cat_pback_test.csv"))
+write.csv(especie_pback_training, paste0("AlertaForestal/cat_pback_training.csv"))
+write.csv(especie_only_test, paste0("AlertaForestal/Cat_only_test.csv"))
+write.csv(especie_only_training, paste0("AlertaForestal/Cat_only_training.csv"))
+
+#GENERAMOS FICHERO DE EVALUACIóN
+presencia.evaluacion<-presencias[muestra.presencia, ]
+ausencia.evaluacion<-ausencias[muestra.ausencia, ]
+test<-rbind(presencia.evaluacion,ausencia.evaluacion)
+
+#GENERAMOS FICHERO DE CALIBRADO
+presencia.training<-presencias[-muestra.presencia, ]
+ausencia.training<-ausencias[-muestra.ausencia, ]
+training <- rbind(presencia.training,ausencia.training)
+
+write.csv(test, paste0("AlertaForestal/cat_pseudo_test.csv"))
+write.csv(training, paste0("AlertaForestal/cat_pseudo_training.csv"))
+
+
+
+
+##Només si es fan servir les dades dels AR com a 0
+cat_all<-read.xlsx("AlertaForestal/AF_Model.xlsx")
+
+presencias <- cat_all[cat_all$presence==1, ]
+ausencias <- cat_all[!cat_all$presence==1, ]
+
+#Seleccionar el 30% de presències i d'absències
+numero.presencias.evaluacion<-round((30*nrow(presencias))/100)
+numero.ausencias.evaluacion<-round((30*nrow(ausencias))/100)
+
+muestra.presencia<-sample_n(presencias, numero.presencias.evaluacion)
+muestra.ausencia<-sample_n(ausencias, numero.ausencias.evaluacion)
+
+#Fitxer evaluació (30% dades)
+cyd_test <- rbind(muestra.presencia,muestra.ausencia)
+#Fitser calibració (70% dades)
+cyd_training <- anti_join(cat_all, cyd_test, by="ID")
+
+#Guardar
+write.csv(cyd_test, paste0("AlertaForestal/cyd_test.csv"))
+write.csv(cyd_training, paste0("AlertaForestal/cyd_training.csv"))
+
+
+
+
+
+#################################
+### 6. MODEL CATALUNYA SPREAD ###
+#################################
+
+cyd_training <- read.csv("AlertaForestal/cat_pback_training.csv",header = T,row.names = 1)  
+#cyd_training <- read.csv("AlertaForestal/cyd_training.csv",header = T,row.names = 1) # si es treballa amb 0 dels AR
+
+#Arreglar cyd_training
+cyd_training<-cyd_training[,c(1,13:26)]
+cyd_training<-na.omit(cyd_training)
+
+#Background ponderat - només si s'utilitzen pseudoabsències
+cyd_training[cyd_training$presence==1, "peso"] <- nrow(cyd_training[cyd_training$presence==1,])/nrow(cyd_training[cyd_training$presence==1,])
+cyd_training[cyd_training$presence==0, "peso"] <- nrow(cyd_training[cyd_training$presence==1,])/nrow(cyd_training[cyd_training$presence==0,])
+
+
+# MODELO SPREAD SUITABILITY
+###GLM
+glm.spread<-glm (presence ~  
+                 as.factor(aspect) + DEM+I(DEM^2) + SDM+I(SDM^2) + pg_boixos+I(pg_boixos^2) + 
+                 dist_2018+I(dist_2018^2) + bosc_pg+I(bosc_pg^2) + AB+I(AB^2) + hetero+I(hetero^2) + fragment+I(fragment^2),
+                 family = binomial(link = "logit"), data=cyd_training, na.action = na.fail)
+
+glm.spread<-glm (presence ~  
+                   as.factor(aspect) + DEM+I(DEM^2) + SDM+I(SDM^2) + pg_boixos+I(pg_boixos^2) + 
+                   dist_2018+I(dist_2018^2) + bosc_pg+I(bosc_pg^2) + AB+I(AB^2) + hetero+I(hetero^2) + fragment+I(fragment^2),
+                 family = binomial(link = "logit"), data=cyd_training, weights=peso,na.action = na.fail) #*amb "peso" només si s'utilitzen pseudabsencies
+
+save(glm.spread, file = "AlertaForestal/mod_cyd.RData")
+save(glm.spread, file = "AlertaForestal/mod_cyd_pseudoab.RData")
+
+#AIC
+MuMin <- dredge(glm.spread, rank = AICc)
+write.xlsx(MuMin, "AlertaForestal/MuMin_cat.xlsx")
+
+
+#resumen de los modelos
+summary.lm(glm.spread)
+
+
+#DIBUJAMOS LAS CURVAS DE RESPUESTA
+par(mfrow=c(3,3))
+plotmo(glm.spread, level.shade="skyblue2")
+
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse después de calibrar el modelo con datos del periodo de referencia, pero así ahorro espacio)
+especie_test <- read.table(paste0("AlertaForestal/cat_pback_test.csv"), sep=",", dec=".", header = T,row.names = 1)
+#especie_test <- read.csv("AlertaForestal/cyd_test.csv",header = T,row.names = 1) #*0 dels AR
+
+especie_test$idoneidad <- predict(glm.spread, especie_test[, c(15,17:20,23:26)], type="response")
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+
+#PREDICCIÓ CATALUNYA
+#1. Model
+load("AlertaForestal/mod_cyd_pseudoab.RData")
+#load("AlertaForestal/mod_cyd.RData") #0 dels AR
+
+#2. Variables ambientals
+aspect <- as.factor(raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc"))
+crs(aspect) <- CRS("+init=epsg:25831")
+
+DEM <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Elevacions/DEM_100m.asc")
+crs(DEM) <- CRS("+init=epsg:25831")
+#DEM <- scale(DEM)
+SDM <- raster("Model GLM/random i Wan14/Europa.tif")
+SDM <- projectRaster(SDM,aspect)
+#SDM <- scale(SDM)
+pg_boixos <- raster("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Buxus/Buxus_pg.tif")
+#pg_boixos <- scale(pg_boixos)
+dist_2018 <- raster("AlertaForestal/Input raster/dist_2018.tif")
+#dist_2018 <- scale(dist_2018)
+dist_2019 <- raster("AlertaForestal/Input raster/dist_2019.tif")
+#dist_2019 <- scale(dist_2019)
+AB <- raster("AlertaForestal/Input raster/AB.tif")
+#AB <- scale(AB)
+bosc_pg <- raster ("AlertaForestal/Input raster/bosc_pg.tif")
+#bosc_pg <- scale(bosc_pg)
+hetero_r <- raster("Fragmentacio habitat/hetero_cat1000.tif")
+fragment_r <- raster("Fragmentacio habitat/fragment_cat1000.tif")
+
+
+
+
+#3. Predict
+cat <- read.xlsx("AlertaForestal/AF_Model_pseudoab.xlsx")
+#cat <- read.xlsx("AlertaForestal/AF_Model.xlsx") #0 dels AR
+cat<-subset(cat, cat$presence==1)
+
+
+predictors <- stack(aspect,DEM,SDM,pg_boixos,dist_2018,dist_2019,bosc_pg,AB)
+predictors1000 <- aggregate(predictors[[2:8]], fact=10)
+aspect1000 <- aggregate(predictors[[1]],fact=10,fun=modal)
+predictors1000 <- stack(aspect1000,predictors1000)
+habitat<-stack(hetero_r,fragment_r) #*ja estan a resolució 1000 (però disaggregated a 100)
+sotana <- as.data.frame(predictors1000, xy=T)
+sotana[,c(11,12)]<-extract(habitat, sotana[,c(1,2)])
+names(sotana) <- c("x","y","aspect","DEM","SDM","pg_boixos","dist_2018","dist_2018","bosc_pg","AB","hetero","fragment")
+sotana$Cyd_2019 <- predict(glm.spread, sotana[, c(3:7,9:12)], type="response")
+sotana$Cyd_2020 <- predict(glm.spread, sotana[, c(3:6,8:12)], type="response")
+
+Cyd_2019 <- rasterFromXYZ(sotana[,c(1,2,13)])
+Cyd_2020 <- rasterFromXYZ(sotana[,c(1,2,14)])
+
+par(mfrow=c(1,1))
+plot(Cyd_2019, main=paste0("Cydalima 2019"))
+points(cat[,c(13,14)])
+crs(Cyd_2019) <- CRS("+init=epsg:25831")
+writeRaster(Cyd_2019, filename= paste0("AlertaForestal/Output/Cyd_pseudoab_2019.tif"), format="GTiff", overwrite=TRUE)
+
+par(mfrow=c(1,1))
+plot(Cyd_2020, main=paste0("Cydalima 2020"))
+crs(Cyd_2020) <- CRS("+init=epsg:25831")
+writeRaster(Cyd_2020, filename= paste0("AlertaForestal/Output/Cyd_pseudoab_2020.tif"), format="GTiff", overwrite=TRUE)
+
+
+
+###MAXENT
+#Variables
+lista.variables <- list.files(path="AlertaForestal/Maxent/MaxEnt_Input/Cydalima_2018",pattern='*.asc', full.names=TRUE)
+lista.variables <- lista.variables[c(1,2,3,4,6,7,11,12,13)]
+variables <- stack(lista.variables)
+
+#Presencies
+especie <- read.csv("AlertaForestal/Maxent/Mask Buxus/MaxEnt_Input/AF_maxent.csv",header = T)  
+especie<-especie[,c(2,3)]
+colnames(especie)<-c("x","y")
+especie_training<-sample_n(especie, round(nrow(especie)*0.7,0))
+especie_test <-  anti_join(especie, especie_training)
+
+#Background
+bg_cat <- as.data.frame(randomPoints(mask=variables, n=10000),xy=T)
+bg_cat$val<- extract(variables$DEM1, bg_cat)
+bg<-subset(bg_cat, bg_cat$val>0)
+bg<-bg[,c(1,2)]
+
+#Model
+maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/AlertaForestal/Maxent/MaxEnt fet amb R")
+
+me <- maxent(variables, p=especie_training, a=bg, args=c("betamultiplier=3", "threshold=FALSE", "writeplotdata=TRUE",
+                                                         "replicates=10", "replicatetype=crossvalidate", "outputgrids=FALSE","appendtoresultsfile=TRUE", "responsecurves=TRUE","jackknife=TRUE", maxentout))
+me <- maxent(variables, p=especie, a=bg, args=c("betamultiplier=3", "outputgrids=FALSE","threshold=FALSE", "replicates=10", "replicatetype=crossvalidate","jackknife=FALSE", "responsecurves=FALSE"))
+
+maxent.ref <- predict(me, variables, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))
+maxent.ref.avg <- mean(maxent.ref[["layer.1"]],maxent.ref[["layer.2"]],maxent.ref[["layer.3"]],
+                       maxent.ref[["layer.4"]],maxent.ref[["layer.5"]],maxent.ref[["layer.6"]],
+                       maxent.ref[["layer.7"]],maxent.ref[["layer.8"]],maxent.ref[["layer.9"]],
+                       maxent.ref[["layer.10"]])
+plot(maxent.ref.avg, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+
+writeRaster(maxent.ref.avg, filename= "AlertaForestal/Maxent/MaxEnt fet amb RDistCat_2018.tif", format="GTiff", overwrite=TRUE)
+
+#EVALUAMOS EL MODELO
+##AUC
+especie_test$idoneidad <- extract(maxent.ref.avg, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+#Boyce
+##Continuous Boyce Index
+maxent.ref.avg<-raster(paste0("AlertaForestal/Maxent/MaxEnt fet amb R/DistCat_2018.tif"))
+especie_test$SDM<-extract(maxent.ref.avg, especie_test[,c(1,2)])
+
+obs <- especie_test$SDM
+ecospat.boyce (fit = especie_test$SDM , obs, nclass=0, 
+               window.w="default", res=100, PEplot = TRUE)
+
+
+
+
+###############################
+### 7. MODEL CATALUNYA CORE ###
+###############################
+
+cyd_training <- read.csv("AlertaForestal/cat_pback_training.csv",header = T,row.names = 1)  # si es treballa amb pseudoabsències
+#cyd_training <- read.csv("AlertaForestal/cyd_training.csv",header = T,row.names = 1)
+#cyd_training<-subset(cyd_training, cyd_training$presence==1) #en cas d'usar 1=ALTA+MOLTALTA; 0=MODERADA,BAIXA amb dades dels AR
+
+#Seleccionar ALTA INTENSITAT
+cyd_training$presence2<-ifelse(cyd_training$description=="Alta"|cyd_training$description=="Molt Alta",1,0)
+cyd_training$presence2[is.na(cyd_training$presence2)] <- 0
+
+#Arreglar cyd_training
+cyd_training<-cyd_training[,c(1,13:27)]
+cyd_training<-na.omit(cyd_training)
+
+#Background ponderat - només si s'utilitzen pseudoabsències
+cyd_training[cyd_training$presence2==1, "peso"] <- nrow(cyd_training[cyd_training$presence2==1,])/nrow(cyd_training[cyd_training$presence2==1,])
+cyd_training[cyd_training$presence2==0, "peso"] <- nrow(cyd_training[cyd_training$presence2==1,])/nrow(cyd_training[cyd_training$presence2==0,])
+
+
+
+# MODELO CORE
+
+glm.core<-glm (presence2 ~  
+                        as.factor(aspect) + DEM+I(DEM^2) + SDM+I(SDM^2) + pg_boixos+I(pg_boixos^2) + 
+                        dist_2018high+I(dist_2018high^2) + bosc_pg+I(bosc_pg^2) + AB+I(AB^2) + hetero+I(hetero^2) + fragment+I(fragment^2),
+                      family = binomial(link = "logit"), data=cyd_training, na.action = na.fail)
+
+glm.core<-glm (presence2 ~  
+                 as.factor(aspect) + DEM+I(DEM^2) + SDM+I(SDM^2) + pg_boixos+I(pg_boixos^2) + 
+                 dist_2018high+I(dist_2018high^2) + bosc_pg+I(bosc_pg^2) + AB+I(AB^2) + hetero+I(hetero^2) + fragment+I(fragment^2),
+               family = binomial(link = "logit"), data=cyd_training, weights=peso,na.action = na.fail) #només amb pseudoabsències
+
+
+#save(glm.core, file = "AlertaForestal/mod_core.RData")
+save(glm.core, file = "AlertaForestal/mod_core.RData")
+save(glm.core, file = "AlertaForestal/mod_core_pseudoab.RData")
+
+
+#resumen de los modelos
+summary.lm(glm.core)
+
+
+#DIBUJAMOS LAS CURVAS DE RESPUESTA
+par(mfrow=c(3,3))
+plotmo(glm.core, level.shade="skyblue2")
+
+
+#EVALUAMOS EL MODELO (cronologicamente deberia hacerse después de calibrar el modelo con datos del periodo de referencia, pero así ahorro espacio)
+especie_test <- read.table(paste0("AlertaForestal/cat_pback_test.csv"), sep=",", dec=".", header = T,row.names = 1)
+#especie_test <- read.csv("AlertaForestal/cyd_test.csv",header = T,row.names = 1) #0 dels AR
+#especie_test<-subset(especie_test, especie_test$presence==1) #en cas d'usar 1=ALTA+MOLTALTA; 0=MODERADA,BAIXA
+
+especie_test$presence2<-ifelse(especie_test$description=="Alta"|especie_test$description=="Molt Alta",1,0)
+especie_test$presence2[is.na(especie_test$presence2)] <- 0
+
+especie_test$idoneidad <- predict(glm.core, especie_test[, c(15,17,18,19,22,23,24,25,26)], type="response")
+valores.presencias<-especie_test[especie_test$presence2==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence2==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+
+
+#PREDICCIÓ CATALUNYA
+#1. Model
+load("AlertaForestal/mod_core_pseudoab.RData")
+#load("AlertaForestal/mod_core.RData") #0 dels AR
+
+
+#2. Variables ambientals
+aspect <- as.factor(raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Aspect/Aspect_100m_31N-ETRS89.asc"))
+crs(aspect) <- CRS("+init=epsg:25831")
+DEM <- raster("C:/Users/quim.canelles/Documents/Dades/Topografia/Elevacions/DEM_100m.asc")
+crs(DEM) <- CRS("+init=epsg:25831")
+#DEM <- scale(DEM)
+SDM <- raster("Model GLM/random i Wan14/Europa.tif")
+SDM <- projectRaster(SDM,aspect)
+#SDM <- scale(SDM)
+pg_boixos <- raster("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Buxus/Buxus_pg.tif")
+#pg_boixos <- scale(pg_boixos)
+dist_2018high <- raster("AlertaForestal/Input raster/dist_2018high.tif")
+#dist_2018high <- scale(dist_2018high)
+dist_2019high <- raster("AlertaForestal/Input raster/dist_2019high.tif")
+#dist_2019high <- scale(dist_2019high)
+AB <- raster("AlertaForestal/Input raster/AB.tif")
+#AB <- scale(AB)
+bosc_pg <- raster ("AlertaForestal/Input raster/bosc_pg.tif")
+#bosc_pg <- scale(bosc_pg)
+hetero_r <- raster("Fragmentacio habitat/hetero_cat1000.tif")
+fragment_r <- raster("Fragmentacio habitat/fragment_cat1000.tif")
+
+
+
+#3. Predict
+predictors <- stack(aspect,DEM,SDM,pg_boixos,dist_2018high,dist_2019high,bosc_pg,AB)
+predictors1000 <- aggregate(predictors[[2:8]], fact=10)
+aspect1000 <- aggregate(predictors[[1]],fact=10,fun=modal)
+predictors1000 <- stack(aspect1000,predictors1000)
+habitat<-stack(hetero_r,fragment_r) #*ja estan a resolució 1000 (però disaggregated a 100)
+sotana <- as.data.frame(predictors1000, xy=T)
+sotana[,c(11,12)]<-extract(habitat, sotana[,c(1,2)])
+names(sotana) <- c("x","y","aspect","DEM","SDM","pg_boixos","dist_2018high","dist_2018high","bosc_pg","AB","hetero","fragment")
+sotana$Cyd_2019 <- predict(glm.core, sotana[, c(3:7,9:12)], type="response")
+sotana$Cyd_2020 <- predict(glm.core, sotana[, c(3:6,8:12)], type="response")
+
+Cyd_2019 <- rasterFromXYZ(sotana[,c(1,2,13)])
+Cyd_2020 <- rasterFromXYZ(sotana[,c(1,2,14)])
+
+par(mfrow=c(1,1))
+plot(Cyd_2019, main=paste0("Cydalima CORE 2019"))
+crs(Cyd_2019) <- CRS("+init=epsg:25831")
+writeRaster(Cyd_2019, filename= paste0("AlertaForestal/Output/CydCORE_pseudoabs_2019.tif"), format="GTiff", overwrite=TRUE)
+
+par(mfrow=c(1,1))
+plot(Cyd_2020, main=paste0("Cydalima CORE 2020"))
+crs(Cyd_2020) <- CRS("+init=epsg:25831")
+writeRaster(Cyd_2020, filename= paste0("AlertaForestal/Output/CydCORE_pseudoabs_2020.tif"), format="GTiff", overwrite=TRUE)
+
+
+
+###MAXENT
+#Variables
+lista.variables <- list.files(path="AlertaForestal/Maxent/Mask Buxus/MaxEnt_Input/Cydalima_2018",pattern='*.asc', full.names=TRUE)
+lista.variables <- lista.variables[c(1,2,3,4,6,8,9,10,11)]
+variables <- stack(lista.variables)
+
+#Presencies
+especie <- read.csv("AlertaForestal/Maxent/Mask Buxus/MaxEnt_Input/AF_maxent.csv",header = T)  
+especie<-especie[,c(2,3)]
+colnames(especie)<-c("x","y")
+especie_training<-sample_n(especie, round(nrow(especie)*0.7,0))
+especie_test <-  anti_join(especie, especie_training)
+
+#Background
+bg_cat <- as.data.frame(randomPoints(mask=variables, n=10000),xy=T)
+bg_cat$val<- extract(variables$DEM1, bg_cat)
+bg<-subset(bg_cat, bg_cat$val>0)
+bg<-bg[,c(1,2)]
+
+#Model
+maxentout <- paste0("outputdirectory=C:/Users/quim.canelles/OneDrive - ctfc.cat/Cydalima/SDM Cydalima/AlertaForestal/Maxent/MaxEnt fet amb R/Core")
+
+me <- maxent(variables, p=especie_training, a=bg, args=c("betamultiplier=3", "threshold=FALSE", "writeplotdata=TRUE",
+                                                         "replicates=10", "replicatetype=crossvalidate", "outputgrids=FALSE","appendtoresultsfile=TRUE", "responsecurves=TRUE","jackknife=TRUE", maxentout))
+me <- maxent(variables, p=especie, a=bg, args=c("betamultiplier=3", "outputgrids=FALSE","threshold=FALSE", "replicates=10", "replicatetype=crossvalidate","jackknife=FALSE", "responsecurves=FALSE"))
+
+maxent.ref <- predict(me, variables, args=c( "doclamp=TRUE", "writeclampgrid=TRUE"))
+maxent.ref.avg <- mean(maxent.ref[["layer.1"]],maxent.ref[["layer.2"]],maxent.ref[["layer.3"]],
+                       maxent.ref[["layer.4"]],maxent.ref[["layer.5"]],maxent.ref[["layer.6"]],
+                       maxent.ref[["layer.7"]],maxent.ref[["layer.8"]],maxent.ref[["layer.9"]],
+                       maxent.ref[["layer.10"]])
+plot(maxent.ref.avg, main= paste0("MAXENT Cydalima"), cex.main=0.8)
+
+writeRaster(maxent.ref.avg, filename= paste0("AlertaForestal/Maxent/MaxEnt fet amb R/Core/SeverCat_2018.tif"), format="GTiff", overwrite=TRUE)
+
+#EVALUAMOS EL MODELO
+##AUC
+especie_test$idoneidad <- extract(maxent.ref.as.avg, especie_test[, c("x","y")])
+valores.presencias<-especie_test[especie_test$presence==1, "idoneidad"]
+valores.ausencias<-especie_test[especie_test$presence==0, "idoneidad"]
+
+evaluacion<-evaluate(p=valores.presencias, a=valores.ausencias)#p=presence points, a=absence points
+evaluacion
+
+par(mfrow=c(1,3), mar=c(2,2,4,2), oma=c(3,3,5,3))
+density(evaluacion)
+boxplot(evaluacion, col=c("blue", "red"))
+plot(evaluacion, "ROC")
+
+#Boyce
+##Continuous Boyce Index
+maxent.ref.avg<-raster(paste0("AlertaForestal/Maxent/MaxEnt fet amb R/Core/SeverCat_2018.tif"))
+especie_test$SDM<-extract(maxent.ref.avg, especie_test[,c(1,2)])
+
+obs <- (especie_test$SDM)
+ecospat.boyce (fit = especie_test$SDM , obs, nclass=0, 
+               window.w="default", res=100, PEplot = TRUE)
