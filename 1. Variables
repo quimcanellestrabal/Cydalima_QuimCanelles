@@ -1,0 +1,129 @@
+####################################
+### Models Cydalima perspectalis ###
+####################################
+
+
+###################################################################
+### 1. Variables climàtiques/ambientals doc:"1. Variables_Cp.R" ###
+###################################################################
+
+#load
+setwd("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/")
+
+library(raster) #TRABAJO CON DATOS RASTER
+library(HH) #VARIANCE INFLATION FACTOR
+library(rgeos) #OPERACIONES GEOMETRICAS CON INFO GEOGRAFICA
+library(dismo) #LIBRERIA PARA MODELOS DE DISTRIBUCION
+library(rgdal)
+library(sp)
+library(rasterVis)
+library(maptools)
+library(rJava)
+library(openxlsx)
+
+
+
+
+###### SELECCION DE VARIABLES  ########
+
+#LISTADO DE VARIABLES
+lista.variables <- list.files(path="C:/Users/quim.canelles/Documents/Dades/Clima/Chelsea-Climate/Anual/",pattern='*.tif', full.names=TRUE)
+
+variables <- stack(lista.variables)
+names(variables)
+
+plot(variables[["CHELSA_anual_bio01"]])
+
+# COMPROBAMOS RESOLUCION DE LAS VARIABLES
+res.grados<-xres(variables)
+res.grados
+#en km
+res.km<-res.grados*111.19
+res.km#aprox 10km
+
+
+
+
+
+###### ANALISIS DE CORRELACIÓN DE VARIABLES ######
+
+#TRANSFORMA LOS MAPAS EN UNA TABLA CON PUNTOS RANDOM o CON LOS PUNTOS DE NUESTRA ESPECIE
+variables.tabla<- as.data.frame(sampleRandom(variables,1000,xy=F))
+gbif_editat<-read.xlsx("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/GBIF/gbif_editat.xlsx") #Cydalima¡
+variables.tabla<-as.data.frame(extract(variables,gbif_editat[,c(2,3)]))
+
+#ELIMINA LOS VALORES NULOS
+variables.tabla<-na.omit(variables.tabla)
+
+#MATRIZ DE CORRELACIóN (cor function)
+M <-cor(variables.tabla)
+
+#MATRIZ DE DISTANCIAS ('ABS' = VALOR ABSOLUTO, PARA ELIMINAR CORRELACIONES NEGATIVAS)as.dist convierte una matriz de correlacion en una matriz de distancia
+variables.dist<-as.dist(abs(M))## se usa el valor absoluto para tener en cuenta también las correlaciones negativas. 
+
+#CLUSTER DE VARIABLES SEGUN LA DISTANCIA (MENOR DISTANCIA = MAYOR CORRELACION)
+variables.cluster<-hclust(1-variables.dist)
+
+#GRAFICO DEL CLUSTER DE CORRELACIONES 
+par(mfrow=c(1,1))
+plot(variables.cluster)
+abline(h=0.25, col="red")
+
+# después de observar el cluster se seleccionan algunas variables. En nuestro caso, todas 6.
+
+
+
+
+###### ANALISIS VIF ######
+
+#En este momento debemos transformar las varibles seleccionadas en data.frame para poder hacer el VIF.
+#PERO PUEDE HABER VARIABLES QUE SON COMBINACIoN LINEAL DE OTRAS VARIABLES...
+#CALCULAMOS EL VARIANCE INFLATION FACTOR
+# Si el valor es mayor de 5 debemos eliminar la variable por estar correlacionada con otras
+variables.tabla2<-variables.tabla[,c(2,15,18,19,6,5,4,12,17)]
+variables.tabla2<-variables.tabla[,c(2,6,8,3,15,9,1,5,12,19,17)]
+resultado.vif<-vif(variables.tabla2)#aplicas la función vif con las variables seleccioinadas anteriormente.
+resultado.vif
+
+variables.tabla2$CHELSA_anual_bio19 <-NULL# quitamos bioclim1, bioclim4
+resultado.vif<-vif(variables.tabla2)
+resultado.vif
+
+variables.tabla2$CHELSA_anual_bio04 <-NULL# bioclim4
+resultado.vif<-vif(variables.tabla2)
+resultado.vif
+
+
+## una vez obtenidos los resultados del VIF, las agrupamos como variables seleccionadas VIF
+
+vars.vif<-c("CHELSA_anual_bio02", "CHELSA_anual_bio05", "CHELSA_anual_bio06", "CHELSA_anual_bio12")
+vars.vif<-c("CHELSA_anual_bio03", "CHELSA_anual_bio05", "CHELSA_anual_bio06", "CHELSA_anual_bio08","CHELSA_anual_bio09", "CHELSA_anual_bio12", "CHELSA_anual_bio15")
+vars.vif<-c("CHELSA_anual_bio02", "CHELSA_anual_bio05", "CHELSA_anual_bio06", "CHELSA_anual_bio12","CHELSA_anual_bio15", "CHELSA_anual_bio17", "CHELSA_anual_bio18", "CHELSA_anual_bio19")
+
+vars<-stack(variables[[vars.vif]])
+
+#ploteamos las variables
+plot(variables, main=names(variables_VIF))
+
+
+##SELECCIÓ FINAL: CHELSA_anual_bio02; CHELSA_anual_bio05; CHELSA_anual_bio06; CHELSA_anual_bio12
+##GUARDAR
+save(vars, file=paste0("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Variables climatiques/variables.RData"))
+
+
+##Retallar per Europa i Asia
+e_eu<-extent(-15,50,35,75)
+vars_europa<-crop(vars,e_eu)
+save(vars_europa, file=paste0("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Variables climatiques/variables_europa.RData"))
+
+e_as<-extent(95,150,20,45)                
+vars_asia<-crop(vars,e_as)
+save(vars_asia, file=paste0("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Variables climatiques/variables_asia.RData"))
+
+for(i in 1:length(vars.vif)){
+  a<-vars_europa[[i]]
+  writeRaster(a, paste0("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Variables climatiques/Europa_",vars.vif[i]),format="ascii", overwrite=T)
+  b<-vars_asia[[i]]
+  writeRaster(b, paste0("C:/Users/quim.canelles/Documents/Cydalima/SDM Cydalima/Variables climatiques/Asia_",vars.vif[i]),format="ascii", overwrite=T)
+  
+}
